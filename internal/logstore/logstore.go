@@ -330,6 +330,7 @@ func logEntry(e Entry, echoIt bool) {
 	if ec {
 		echoLog("%s", Human(e))
 	}
+	callTees(e)
 	if s != nil {
 		s.Append(e)
 	}

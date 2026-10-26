@@ -50,6 +50,59 @@ func UserConfig() string {
 type state struct {
 	Upstream     string `json:"upstream"`      // registry public requests go to
 	RegistryLine string `json:"registry_line"` // user's own registry= line, restored on undo
+	// LoglevelAdded is true when consona wrote loglevelLine (the user had
+	// no loglevel of their own). npm strips comments when it rewrites the
+	// npmrc, so the line is recognised by this flag plus its value.
+	LoglevelAdded bool `json:"loglevel_added,omitempty"`
+}
+
+// loglevelLine makes every npm command show what it does (consona's
+// output is verbose too; `consona ... --quiet` turns both down).
+const loglevelLine = "loglevel=verbose"
+
+// isConsonaLoglevel reports whether line is the loglevel line consona
+// wrote (given that the state says it wrote one).
+func isConsonaLoglevel(line string, added bool) bool {
+	k, v, ok := kv(line)
+	return added && ok && k == "loglevel" && v == "verbose"
+}
+
+// OwnsLoglevel reports whether `consona setup` added loglevel=verbose to
+// the user npmrc (and it is still there).
+func OwnsLoglevel() bool {
+	if !loadState().LoglevelAdded {
+		return false
+	}
+	b, _ := os.ReadFile(UserConfig())
+	for _, l := range strings.Split(string(b), "\n") {
+		if isConsonaLoglevel(l, true) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetupNpmrc is UpdateNpmrc plus consona's loglevel line: added inside the
+// block unless the user has a loglevel line of their own (a previous
+// consona line, known from ownedLoglevel, is not the user's). added says
+// whether the result carries consona's line.
+func SetupNpmrc(content, baseURL string, owners []string, ownedLoglevel bool) (out string, added bool, err error) {
+	var lines []string
+	userLevel := false
+	for _, l := range strings.Split(content, "\n") {
+		if k, _, ok := kv(l); ok && k == "loglevel" {
+			if isConsonaLoglevel(l, ownedLoglevel) {
+				continue
+			}
+			userLevel = true
+		}
+		lines = append(lines, l)
+	}
+	out, err = UpdateNpmrc(strings.Join(lines, "\n"), baseURL, owners)
+	if err != nil || userLevel {
+		return out, false, err
+	}
+	return strings.TrimSuffix(out, blockEnd+"\n") + loglevelLine + "\n" + blockEnd + "\n", true, nil
 }
 
 func statePath() string { return filepath.Join(core.Home(), "npm-setup.json") }
@@ -144,7 +197,7 @@ func (Adapter) Setup(_ context.Context, baseURL string, owners []string) (string
 	st := loadState()
 	for _, l := range strings.Split(string(old), "\n") {
 		if kind, k, v := lineKind(l); kind == "" && k == "registry" && strings.HasPrefix(v, "http") {
-			st = state{Upstream: v, RegistryLine: strings.TrimSpace(l)} // last one wins, like npm
+			st.Upstream, st.RegistryLine = v, strings.TrimSpace(l) // last one wins, like npm
 		}
 	}
 	if st.Upstream == "" { // e.g. set in the global npmrc or environment
@@ -155,10 +208,11 @@ func (Adapter) Setup(_ context.Context, baseURL string, owners []string) (string
 	if st.Upstream == "" {
 		st.Upstream = DefaultUpstream
 	}
-	out, err := UpdateNpmrc(string(old), baseURL, owners)
+	out, added, err := SetupNpmrc(string(old), baseURL, owners, st.LoglevelAdded)
 	if err != nil {
 		return "", err
 	}
+	st.LoglevelAdded = added
 	if err := os.MkdirAll(filepath.Dir(statePath()), 0o700); err != nil {
 		return "", err
 	}
@@ -227,7 +281,8 @@ func UpdateNpmrc(content, baseURL string, owners []string) (string, error) {
 	return text + blockEnd + "\n", nil
 }
 
-// Teardown removes every consona line, restores the user's own registry
+// Teardown removes every consona line (loglevel=verbose only if consona
+// added it), restores the user's own registry
 // line if npm dropped it, and moves a login made through consona to the
 // upstream registry's key (unless one is already there).
 func (Adapter) Teardown(context.Context) (string, error) {
@@ -246,7 +301,7 @@ func (Adapter) Teardown(context.Context) (string, error) {
 		switch {
 		case kind == "token" && v != Placeholder:
 			login = v
-		case kind != "":
+		case kind != "", isConsonaLoglevel(l, st.LoglevelAdded):
 		default:
 			keep = append(keep, l)
 			hasRegistry = hasRegistry || k == "registry"
