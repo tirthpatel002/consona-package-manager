@@ -235,3 +235,31 @@ func TestTokenType(t *testing.T) {
 		}
 	}
 }
+
+func TestGHLoginHonoursEmptyGHConfigDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	bin := t.TempDir()
+	// A gh that always answers with a token, like gh on macOS falling back
+	// to the keychain's default login.
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\necho "+tokG+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	empty := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", empty)
+	if tok, err := GHLogin(); err == nil || tok != "" {
+		t.Fatalf("empty GH_CONFIG_DIR must mean no gh login, got token=%v err=%v", tok != "", err)
+	}
+	if err := os.WriteFile(filepath.Join(empty, "hosts.yml"), []byte("github.com:\n    user: fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if tok, err := GHLogin(); err != nil || tok != tokG {
+		t.Fatalf("logged-in GH_CONFIG_DIR: err=%v", err)
+	}
+	t.Setenv("GH_CONFIG_DIR", "")
+	if tok, err := GHLogin(); err != nil || tok != tokG {
+		t.Fatalf("no GH_CONFIG_DIR: err=%v", err)
+	}
+}

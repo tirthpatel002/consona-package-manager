@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -105,6 +106,9 @@ func GHLogin() (string, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return "", fmt.Errorf("gh is not installed (optional)")
 	}
+	if err := ghConfigDirLoggedIn(os.Getenv("GH_CONFIG_DIR")); err != nil {
+		return "", err
+	}
 	for _, args := range [][]string{{"auth", "token"}, {"config", "get", "-h", "github.com", "oauth_token"}} {
 		cmd := exec.Command("gh", args...)
 		cmd.Env = append(os.Environ(), "GH_TOKEN=", "GITHUB_TOKEN=") // the env vars are their own sources
@@ -114,6 +118,22 @@ func GHLogin() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("gh is installed but not logged in (`gh auth login`)")
+}
+
+// ghConfigDirLoggedIn honours an explicit GH_CONFIG_DIR strictly: without
+// a github.com entry in its hosts.yml there is no gh login. Newer gh
+// releases on macOS otherwise answer `gh auth token` from the keychain's
+// default github.com entry even when GH_CONFIG_DIR is empty, which would
+// silently use the machine's own login.
+func ghConfigDirLoggedIn(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "hosts.yml"))
+	if err != nil || !strings.Contains(string(b), "github.com") {
+		return fmt.Errorf("gh is installed but not logged in in GH_CONFIG_DIR %s (no github.com in hosts.yml)", dir)
+	}
+	return nil
 }
 
 // Invalidate drops cached values (after token add/remove).
