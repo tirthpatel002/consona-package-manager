@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -113,6 +114,14 @@ func newFake(t *testing.T, env map[string]string, gh string, store map[string]st
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	r := &creds.Resolver{Getenv: func(k string) string { return env[k] }, TTL: time.Minute}
+	r.Environ = func() []string {
+		var kv []string
+		for k, v := range env {
+			kv = append(kv, k+"="+v)
+		}
+		sort.Strings(kv)
+		return kv
+	}
 	if gh != "" {
 		r.GH = func() (string, error) { return gh, nil }
 	} else {
@@ -323,6 +332,19 @@ func TestOwnersAcrossCredentials(t *testing.T) {
 	s, _ = newFake(t, map[string]string{"CONSONA_TOKEN": tokBad}, "", nil)
 	if _, err := s.Owners(context.Background()); err == nil || !strings.Contains(err.Error(), "env CONSONA_TOKEN (ghp_…0002): 401") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// Setup with only a per-owner variable (no gh, no general token) finds
+// that owner from the variable name and the token's own account.
+func TestOwnersFromPerOwnerEnv(t *testing.T) {
+	s, _ := newFake(t, map[string]string{"CONSONA_TOKEN_SOME_ORG": tokGood}, "", nil)
+	owners, err := s.Owners(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(owners, ","); got != "some-org,fixture-user,fixture-org" {
+		t.Fatalf("%s", got)
 	}
 }
 

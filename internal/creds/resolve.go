@@ -51,6 +51,7 @@ type Resolver struct {
 	Store     Store
 	IndexPath string
 	GH        func() (string, error) // the gh login token
+	Environ   func() []string        // for CONSONA_TOKEN_<OWNER> discovery; nil = none
 	TTL       time.Duration
 
 	mu    sync.Mutex
@@ -68,12 +69,34 @@ type cached struct {
 // NewResolver uses the process environment, the OS secure store, the
 // token index in ConfigDir and the gh CLI.
 func NewResolver() *Resolver {
-	return &Resolver{Getenv: os.Getenv, Store: SystemStore{}, IndexPath: IndexPath(), GH: GHLogin, TTL: time.Minute}
+	return &Resolver{Getenv: os.Getenv, Environ: os.Environ, Store: SystemStore{}, IndexPath: IndexPath(), GH: GHLogin, TTL: time.Minute}
 }
 
 // EnvName is the per-owner override variable for owner.
 func EnvName(owner string) string {
 	return "CONSONA_TOKEN_" + strings.ToUpper(strings.ReplaceAll(NormOwner(owner), "-", "_"))
+}
+
+// OwnerEnv returns the owners that have a CONSONA_TOKEN_<OWNER> variable
+// set, with that credential. GitHub logins are letters, digits and '-', so
+// the owner is recovered exactly from the variable name.
+func (r *Resolver) OwnerEnv() (owners []string, cands []Candidate) {
+	if r.Environ == nil {
+		return nil, nil
+	}
+	for _, kv := range r.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" || !strings.HasPrefix(k, "CONSONA_TOKEN_") || len(k) == len("CONSONA_TOKEN_") {
+			continue
+		}
+		o := strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(k, "CONSONA_TOKEN_"), "_", "-"))
+		if ValidOwner(o) != nil {
+			continue
+		}
+		owners = append(owners, o)
+		cands = append(cands, Candidate{Source: "env " + k, Kind: "env", Value: v})
+	}
+	return owners, cands
 }
 
 // GHLogin returns the token of the gh login (gh honours GH_CONFIG_DIR):

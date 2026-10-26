@@ -17,7 +17,7 @@ set +x   # never trace: TOK is a real token
 OWNER=${OWNER:-rakesh-jain-cb1998}
 OWNER_ENV=CONSONA_TOKEN_$(printf '%s' "$OWNER" | tr 'a-z-' 'A-Z_')
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PORT=${CONSONA_PORT:-48733}
+PORT=${CONSONA_PORT:-48745}
 OS=$(uname -s)
 FAILS=0 PASSES=0
 pass() { printf 'PASS  %s\n' "$*"; PASSES=$((PASSES+1)); }

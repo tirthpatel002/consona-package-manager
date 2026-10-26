@@ -269,7 +269,11 @@ func (s *Source) Owners(ctx context.Context) ([]string, error) {
 			owners = append(owners, o)
 		}
 	}
-	cands := s.Creds.Candidates("")
+	envOwners, envCands := s.Creds.OwnerEnv()
+	for _, o := range envOwners {
+		addOwner(o)
+	}
+	cands := append(envCands, s.Creds.Candidates("")...)
 	if s.Creds.IndexPath != "" {
 		if ix, err := creds.LoadIndex(s.Creds.IndexPath); err == nil {
 			for _, o := range ix.Owners() {

@@ -276,9 +276,11 @@ location (local folder, SSH) is a new `Source`.
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
 e2e/fixtures.sh   # once: creates the private fixture repos
-e2e/run.sh        # ~3 min end-to-end (Linux or macOS): real GitHub + npm, a
+E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/run.sh
+                  # ~3 min end-to-end (Linux or macOS): real GitHub + npm, a
                   # token-requiring fake registry, a fresh HOME, release build
-                  # + install.sh. GH_CONFIG_DIR/GH_TOKEN pick the fixture owner.
+                  # + install.sh. Ports 48741-48749; the test unit gets only
+                  # the gh config dir path, never a token.
 E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/creds.sh
                   # credentials: no gh + named token in a throwaway Secret
                   # Service, CONSONA_TOKEN only, gh only, mixed fallthrough,
