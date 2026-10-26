@@ -16,6 +16,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OWNER_ENV=CONSONA_TOKEN_$(printf '%s' "$OWNER" | tr 'a-z-' 'A-Z_')
 TMP=$(mktemp -d /tmp/consona-e2e.XXXXXX)
 export CONSONA_HOME=$TMP/consona-home CONSONA_PORT=${CONSONA_PORT:-48741}
+# Config dir (identity, registered folders, remotes, token index, logs) and
+# ssh config are temp too: no local/ssh source or named token of this machine leaks in.
+export CONSONA_CONFIG_DIR=$TMP/cfg CONSONA_SSH_CONFIG=$TMP/ssh_config CONSONA_SSH_AUTODETECT=0
+: > "$CONSONA_SSH_CONFIG"
 export npm_config_userconfig=$TMP/npmrc npm_config_update_notifier=false npm_config_fund=false
 BIN=$TMP/bin/consona
 FAILS=0
@@ -240,6 +244,10 @@ check "lockfile after plain npm: public resolved = registry.npmjs.org ($B2), pri
 read -r REDIR BODIES < <(pubstats)
 check "still 0 public bodies served by the daemon ($REDIR redirects)" test "$BODIES" -eq 0
 
+"$BIN" logs --event source.resolve --json > "$TMP/log-resolve.json" 2>&1
+NGH=$(grep '"source":"github"' "$TMP/log-resolve.json" | grep -o '"package":"[^"]*"' | sort -u | wc -l | tr -d ' ')
+check "event log: GitHub resolutions recorded in the config dir's log store ($NGH private packages, source=github)" \
+  bash -c "[ $NGH -ge 4 ] && [ -d '$CONSONA_CONFIG_DIR/logs' ] && ! grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_' '$TMP/log-resolve.json'"
 TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token)
 [ ${#TOK} -ge 20 ] || fail "could not read gh token for leak check"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | wc -l); unset TOK   # pattern via a pipe, never a file

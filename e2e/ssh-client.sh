@@ -15,6 +15,7 @@ IDF=() IDLINE=; if [ -n "${REMOTE_IDENTITY:-}" ]; then IDF=(--identity "$REMOTE_
 (cd "$ROOT" && go build -o "$BIN" ./cmd/consona) || { echo build failed; exit 1; }
 export CONSONA_HOME=$B/home CONSONA_CONFIG_DIR=$B/cfg npm_config_userconfig=$B/npmrc CONSONA_PORT=${CONSONA_PORT:-48761}
 export CONSONA_SSH_CONFIG=$B/ssh_config GH_CONFIG_DIR=$B/gh-empty CONSONA_REMOTE_CMD=$RS
+unset GH_TOKEN GITHUB_TOKEN CONSONA_TOKEN; for v in $(env | sed -n 's/^\(CONSONA_TOKEN_[A-Z0-9_]*\)=.*/\1/p'); do unset "$v"; done   # GitHub off
 export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false
 cat > "$CONSONA_SSH_CONFIG" <<C
 Host consona-remote
@@ -30,7 +31,8 @@ FAILS=0
 pass() { printf 'PASS  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*"; FAILS=$((FAILS+1)); }
 check() { local m=$1; shift; if "$@"; then pass "$m"; else fail "$m"; fi; }
-now() { date +%s.%N; }
+if command -v perl >/dev/null 2>&1; then now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
+else now() { python3 -c 'import time; print("%.3f" % time.time())'; }; fi
 secs() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", b-a}'; }
 show() { sed 's/^/      | /' "$1"; }
 cleanup() {
@@ -71,7 +73,16 @@ P1=$(secs $t0 $t1)
 t0=$(now); "$BIN" which @e2euser/nope2 > /dev/null 2>&1; t1=$(now); P2=$(secs $t0 $t1)
 echo "      | unknown name with 2 live remotes + 1 unreachable + 1 without consona: ${P1}s first, ${P2}s after (lists cached)"
 check "unknown name: clear not-found, cached lists make the 2nd lookup fast" bash -c "grep -q 'not found' '$B/nope.out' && awk 'BEGIN{exit !($P2 < 1.0)}'"
+"$BIN" logs --event source.resolve --json > "$B/log-resolve.json" 2>&1
+"$BIN" logs --event ssh.probe --errors --json > "$B/log-probe.json" 2>&1
+"$BIN" logs --event remote --json > "$B/log-remote.json" 2>&1
+check "logs: ssh resolutions recorded (source.resolve, fields.source=ssh)" grep -q '"source":"ssh"' "$B/log-resolve.json"
+check "logs: ssh probe failures recorded with ssh's reason (unreachable remote, remote without consona)" bash -c "grep -q '192.0.2.1' '$B/log-probe.json' && grep -q 'no-consona' '$B/log-probe.json'"
+check "logs: not-found names list what was tried (source.fail)" bash -c "'$BIN' logs --event source.fail --json | grep -q 'e2euser/nope.*tried'"
 "$BIN" remote remove nocon >/dev/null; "$BIN" remote remove bad >/dev/null; "$BIN" remote remove vm > "$B/rm.out"; show "$B/rm.out"
 check "remote remove" bash -c "! '$BIN' remote list | grep -q '^vm '"
+"$BIN" logs --event remote --json > "$B/log-remote.json" 2>&1
+check "logs: remote add/test/remove recorded" bash -c "grep -q '\"event\":\"remote.add\"' '$B/log-remote.json' && grep -q '\"event\":\"remote.test\"' '$B/log-remote.json' && grep -q '\"event\":\"remote.remove\"' '$B/log-remote.json'"
+check "no token-shaped string in the client's logs or outputs" bash -c "! grep -rqE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' '$B/cfg' '$B'/*.out '$B'/*.json"
 echo "== $FAILS failure(s)"
 exit $FAILS

@@ -19,6 +19,12 @@ OWNER_ENV=CONSONA_TOKEN_$(printf '%s' "$OWNER" | tr 'a-z-' 'A-Z_')
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PORT=${CONSONA_PORT:-48745}
 OS=$(uname -s)
+# Secure-store service for scenario A. On macOS it is the real login
+# Keychain, so a clearly named test service is used and removed afterwards;
+# on Linux the keyring itself is a throwaway one.
+KSVC=${CONSONA_KEYRING_SERVICE:-dev.consona.tokens}
+[ "$OS" = Darwin ] && [ -z "${CONSONA_KEYRING_SERVICE:-}" ] && KSVC=dev.consona.tokens.e2e-test
+[ "$OS" = Darwin ] && [ "$KSVC" = dev.consona.tokens ] && { echo "creds e2e: refusing to use the real Keychain service on macOS; pick a test CONSONA_KEYRING_SERVICE"; exit 1; }
 FAILS=0 PASSES=0
 pass() { printf 'PASS  %s\n' "$*"; PASSES=$((PASSES+1)); }
 fail() { printf 'FAIL  %s\n' "$*"; FAILS=$((FAILS+1)); }
@@ -38,7 +44,7 @@ scenario_a() {
   local H=$TMP/a-home; mkdir -p "$H"
   ca() { env -i HOME="$H" PATH="$NOGH" USER="${USER:-e2e}" LANG=C.UTF-8 TMPDIR="$TMP" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
-           CONSONA_HOME="$TMP/a-consona" CONSONA_PORT="$PORT" npm_config_userconfig="$TMP/a.npmrc" npm_config_update_notifier=false npm_config_fund=false "$@"; }
+           CONSONA_HOME="$TMP/a-consona" CONSONA_PORT="$PORT" CONSONA_KEYRING_SERVICE="$KSVC" npm_config_userconfig="$TMP/a.npmrc" npm_config_update_notifier=false npm_config_fund=false "$@"; }
   check "A: gh is not on PATH" bash -c "! PATH='$NOGH' command -v gh >/dev/null"
   printf '%s' "$TOK" | ca "$BIN" token add rakesh --for "@$OWNER" --description "e2e fixture owner" > "$TMP/a-add.out" 2>&1; rc=$?
   show "$TMP/a-add.out"
@@ -51,8 +57,8 @@ scenario_a() {
   check "A: index file mode $fm (want 600), dir mode $dm (want 700)" test "$fm" = 600 -a "$dm" = 700
   check "A: index has no token value" bash -c "! grep -qF -f <(printf '%s\n' \"\$1\") '$IDX'" _ "$TOK"
   if [ "$OS" != Darwin ]; then
-    local got; got=$(ca secret-tool lookup service dev.consona.tokens username rakesh 2>/dev/null)
-    check "A: value is in the Secret Service (service dev.consona.tokens)" test "$got" = "$TOK"; unset got
+    local got; got=$(ca secret-tool lookup service "$KSVC" username rakesh 2>/dev/null)
+    check "A: value is in the Secret Service (service $KSVC)" test "$got" = "$TOK"; unset got
   fi
   printf '%s' "$TOK" | ca "$BIN" token add rakesh > "$TMP/a-dup.out" 2>&1; rc=$?
   check "A: adding the same name again fails without --replace (rc=$rc)" bash -c "[ $rc -ne 0 ] && grep -q -- '--replace' '$TMP/a-dup.out'"
@@ -73,13 +79,15 @@ scenario_a() {
   ca "$BIN" logs --event credential > "$TMP/a-logs.out" 2>&1; show "$TMP/a-logs.out"
   check "A: log store: credential.resolve names the named token" grep -q 'credential.resolve.*named token \\\?"rakesh' "$TMP/a-logs.out"
   ca "$BIN" logs info > "$TMP/a-loginfo.out" 2>&1; show "$TMP/a-loginfo.out"
-  check "A: logs info: sqlite backend with entries" bash -c "grep -q '^backend:  sqlite' '$TMP/a-loginfo.out' && ! grep -q '^entries:  0$' '$TMP/a-loginfo.out'"
+  check "A: logs info: sqlite backend with entries" bash -c "grep -q '^backend: *sqlite' '$TMP/a-loginfo.out' && ! grep -q '^entries: *0$' '$TMP/a-loginfo.out'"
   ca "$BIN" logs export --format jsonl -o "$TMP/a-export.jsonl" > /dev/null 2>&1
   check "A: logs export wrote JSON lines with build + install events" bash -c "grep -q '\"event\":\"build.finish\"' '$TMP/a-export.jsonl' && grep -q '\"event\":\"install.resolve\"' '$TMP/a-export.jsonl'"
   ca "$BIN" daemon stop > /dev/null 2>&1
   ca "$BIN" token remove rakesh > "$TMP/a-rm.out" 2>&1; rc=$?
   if [ "$OS" != Darwin ]; then
-    check "A: token remove rc=$rc; gone from the Secret Service and the index" bash -c "[ $rc -eq 0 ] && [ -z \"\$(secret-tool lookup service dev.consona.tokens username rakesh 2>/dev/null)\" ] && ! grep -q rakesh '$IDX'"
+    check "A: token remove rc=$rc; gone from the Secret Service and the index" bash -c "[ $rc -eq 0 ] && [ -z \"\$(secret-tool lookup service '$KSVC' username rakesh 2>/dev/null)\" ] && ! grep -q rakesh '$IDX'"
+  else
+    check "A: token remove rc=$rc; gone from the Keychain (service $KSVC) and the index" bash -c "[ $rc -eq 0 ] && ! security find-generic-password -s '$KSVC' -a rakesh >/dev/null 2>&1 && ! grep -q rakesh '$IDX'"
   fi
   (cd "$H" && ca "$BIN" setup --undo > /dev/null 2>&1)
 }
@@ -105,6 +113,9 @@ KEEP=
 cleanup() {
   for h in "$TMP"/*-consona; do [ -d "$h" ] && CONSONA_HOME=$h CONSONA_PORT=$PORT "$BIN" daemon stop >/dev/null 2>&1; done
   rm -rf "$TMP"/a-home/.local/share/keyrings   # the throwaway keyring, even when keeping the rest
+  if [ "$OS" = Darwin ]; then   # only ever the test service's entry
+    while security delete-generic-password -s "$KSVC" -a rakesh >/dev/null 2>&1; do :; done
+  fi
   [ -z "$KEEP" ] && rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -122,7 +133,7 @@ cat > "$TMP/app.json" <<J
 { "name": "creds-app", "private": true, "version": "0.0.0",
   "dependencies": { "@$OWNER/consona-e2e-lib-a": "^1.0.0", "@$OWNER/consona-e2e-lib-c": "*", "@$OWNER/consona-e2e-lib-ts": "^1.0.0", "clsx": "^2.1.1" } }
 J
-export OWNER OWNER_ENV ROOT PORT OS TMP BIN NOGH TOK
+export OWNER OWNER_ENV ROOT PORT OS TMP BIN NOGH TOK KSVC
 
 # Isolated environment for scenarios B-F: HOME, consona home, npmrc.
 run_in() {   # run_in NAME PATH [VAR=val ...] -- cmd...
