@@ -353,13 +353,15 @@ func (s *Source) checkRedirect(ctx context.Context, owner, repo, path string, re
 	final := strings.TrimPrefix(resp.Request.URL.Path, prefix)
 	key := strings.ToLower(owner + "/" + repo)
 	s.mu.Lock()
-	cur, known := s.redirects[key]
+	cur := s.redirects[key]
 	s.mu.Unlock()
-	if !known {
+	if cur == "" { // only a found name is cached: a failed lookup is retried next time
 		cur = currentName(final)
 		if cur == "" && strings.HasPrefix(final, "/repositories/") {
 			id := strings.SplitN(strings.TrimPrefix(final, "/repositories/"), "/", 2)[0]
-			if r, err := s.do(ctx, "/repositories/"+url.PathEscape(id), "application/vnd.github+json", tok); err == nil {
+			// Not tied to the request: a cancelled npm request must not cost the name.
+			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			if r, err := s.do(lctx, "/repositories/"+url.PathEscape(id), "application/vnd.github+json", tok); err == nil {
 				var m struct {
 					FullName string `json:"full_name"`
 				}
@@ -369,12 +371,17 @@ func (s *Source) checkRedirect(ctx context.Context, owner, repo, path string, re
 				r.Body.Close()
 				cur = m.FullName
 			}
+			cancel()
 		}
 		s.mu.Lock()
 		if s.redirects == nil {
 			s.redirects = map[string]string{}
 		}
-		s.redirects[key] = cur
+		if cur != "" {
+			s.redirects[key] = cur
+		} else {
+			cur = s.redirects[key] // a concurrent lookup may have found it
+		}
 		s.mu.Unlock()
 	}
 	if strings.EqualFold(cur, owner+"/"+repo) {
