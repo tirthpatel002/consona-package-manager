@@ -9,7 +9,12 @@
 #   E  every credential rejected: one error listing each source and its fix
 #   F  no secure store: `token add` fails clearly and writes nothing
 # Needs: go, node/npm, gh with a login that can read the fixtures, given by
-# E2E_GH_CONFIG_DIR (the token is read into this process's memory only).
+# E2E_GH_CONFIG_DIR (the token is read into this process's memory only); or
+# the fixture token in CONSONA_TOKEN_<OWNER> in this process's env, in which
+# case C and D (which need a fixture gh login) are skipped: the machine's
+# default gh login is never used.
+# macOS: scenario A uses the login Keychain (found through the real HOME) with
+# the test service; its consona config dir, home, npmrc and npm cache are temp.
 # Scenario A on Linux needs dbus-run-session, gnome-keyring-daemon and
 # secret-tool (KEYRING_ROOT=<extracted debs> works without installing).
 set -uo pipefail
@@ -42,7 +47,8 @@ scenario_a() {
       || { fail "A: could not start gnome-keyring-daemon"; return; }
   fi
   local H=$TMP/a-home; mkdir -p "$H"
-  ca() { env -i HOME="$H" PATH="$NOGH" USER="${USER:-e2e}" LANG=C.UTF-8 TMPDIR="$TMP" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+  local KH=$H; [ "$OS" = Darwin ] && KH=$REAL_HOME   # the Keychain is found through HOME
+  ca() { env -i HOME="$KH" CONSONA_CONFIG_DIR="$TMP/a-cfg" npm_config_cache="$TMP/a-npmcache" PATH="$NOGH" USER="${USER:-e2e}" LANG=C.UTF-8 TMPDIR="$TMP" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
            CONSONA_HOME="$TMP/a-consona" CONSONA_PORT="$PORT" CONSONA_KEYRING_SERVICE="$KSVC" npm_config_userconfig="$TMP/a.npmrc" npm_config_update_notifier=false npm_config_fund=false "$@"; }
   check "A: gh is not on PATH" bash -c "! PATH='$NOGH' command -v gh >/dev/null"
@@ -50,8 +56,7 @@ scenario_a() {
   show "$TMP/a-add.out"
   check "A: token add (piped stdin) rc=$rc, account $OWNER, value masked" bash -c "[ $rc -eq 0 ] && grep -q 'account:     $OWNER' '$TMP/a-add.out' && grep -qE '\((gh[a-z]_|github_pat_)…[A-Za-z0-9_]{4}\)' '$TMP/a-add.out'"
   check "A: probes for @$OWNER all PASS (repos, metadata, contents, tags)" bash -c "[ \$(grep -c '^  PASS  @$OWNER' '$TMP/a-add.out') -ge 4 ] && ! grep -q '^  FAIL' '$TMP/a-add.out'"
-  local IDX=$H/.config/consona/tokens.json
-  [ "$OS" = Darwin ] && IDX="$H/Library/Application Support/consona/tokens.json"
+  local IDX=$TMP/a-cfg/tokens.json
   local fm dm
   fm=$(stat -c %a "$IDX" 2>/dev/null || stat -f %Lp "$IDX"); dm=$(stat -c %a "$(dirname "$IDX")" 2>/dev/null || stat -f %Lp "$(dirname "$IDX")")
   check "A: index file mode $fm (want 600), dir mode $dm (want 700)" test "$fm" = 600 -a "$dm" = 700
@@ -100,12 +105,22 @@ fi
 
 # ---- setup ----
 for c in go node npm gh curl; do command -v $c >/dev/null || { echo "creds e2e: $c not on PATH"; exit 1; }; done
-: "${E2E_GH_CONFIG_DIR:?set E2E_GH_CONFIG_DIR to the gh config dir of the fixture owner}"
-LOGIN=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh api user --jq .login 2>/dev/null)
-[ "$LOGIN" = "$OWNER" ] || { echo "creds e2e: gh login in $E2E_GH_CONFIG_DIR is '$LOGIN', expected '$OWNER'"; exit 1; }
-TOK=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh auth token 2>/dev/null) ||
-  TOK=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh config get -h github.com oauth_token 2>/dev/null)   # gh < 2.17
-[ -n "$TOK" ] || { echo "creds e2e: no token from gh in $E2E_GH_CONFIG_DIR"; exit 1; }
+unset GH_TOKEN GITHUB_TOKEN CONSONA_TOKEN
+if [ -n "${E2E_GH_CONFIG_DIR:-}" ]; then
+  LOGIN=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh api user --jq .login 2>/dev/null)
+  [ "$LOGIN" = "$OWNER" ] || { echo "creds e2e: gh login in $E2E_GH_CONFIG_DIR is '$LOGIN', expected '$OWNER'"; exit 1; }
+  TOK=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh auth token 2>/dev/null) ||
+    TOK=$(GH_CONFIG_DIR=$E2E_GH_CONFIG_DIR gh config get -h github.com oauth_token 2>/dev/null)   # gh < 2.17
+  [ -n "$TOK" ] || { echo "creds e2e: no token from gh in $E2E_GH_CONFIG_DIR"; exit 1; }
+elif [ -n "${!OWNER_ENV:-}" ]; then
+  TOK=${!OWNER_ENV}; unset "$OWNER_ENV"
+  mkdir -p "/tmp/consona-creds-ghcheck.$$"
+  LOGIN=$(GH_CONFIG_DIR=/tmp/consona-creds-ghcheck.$$ GH_TOKEN=$TOK gh api user --jq .login 2>/dev/null); rm -rf "/tmp/consona-creds-ghcheck.$$"
+  [ "$LOGIN" = "$OWNER" ] || { echo "creds e2e: the token in $OWNER_ENV belongs to '$LOGIN', expected '$OWNER'"; exit 1; }
+else
+  echo "creds e2e: set E2E_GH_CONFIG_DIR (gh config dir of $OWNER) or $OWNER_ENV; the default gh login is never used"; exit 1
+fi
+REAL_HOME=$HOME
 GARBAGE="ghp_$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')"   # well-formed, never valid
 TMP=$(mktemp -d /tmp/consona-creds-e2e.XXXXXX)
 BIN=$TMP/bin/consona
@@ -133,7 +148,7 @@ cat > "$TMP/app.json" <<J
 { "name": "creds-app", "private": true, "version": "0.0.0",
   "dependencies": { "@$OWNER/consona-e2e-lib-a": "^1.0.0", "@$OWNER/consona-e2e-lib-c": "*", "@$OWNER/consona-e2e-lib-ts": "^1.0.0", "clsx": "^2.1.1" } }
 J
-export OWNER OWNER_ENV ROOT PORT OS TMP BIN NOGH TOK KSVC
+export OWNER OWNER_ENV ROOT PORT OS TMP BIN NOGH TOK KSVC REAL_HOME
 
 # Isolated environment for scenarios B-F: HOME, consona home, npmrc.
 run_in() {   # run_in NAME PATH [VAR=val ...] -- cmd...
@@ -187,6 +202,9 @@ check "B: log says env CONSONA_TOKEN was used" grep -q 'env CONSONA_TOKEN' "$TMP
 check "B: setup output has no '@@'" bash -c "! grep -q '@@' '$TMP/b-setup.out'"
 finish b "$NOGH" CONSONA_TOKEN="$TOK"
 
+if [ -z "${E2E_GH_CONFIG_DIR:-}" ]; then
+  echo "SKIP  C, D: no fixture gh config dir (E2E_GH_CONFIG_DIR); the default gh login is never used"; C_T=n/a D_T=n/a
+else
 echo "== C: gh login only"
 read -r rc C_T < <(install_in c "$PATH" GH_CONFIG_DIR="$E2E_GH_CONFIG_DIR")
 check "C: install with only the gh login [${C_T}s] rc=$rc" install_ok $rc c
@@ -200,6 +218,7 @@ check "D: install succeeds despite a bad per-owner token [${D_T}s] rc=$rc" insta
 run_in d "$PATH" -- "$BIN" logs --event credential > "$TMP/d-logs.out" 2>&1; show "$TMP/d-logs.out"
 check "D: log: $OWNER_ENV failed with 401, then gh login used" bash -c "grep -q 'credential.fail.*$OWNER_ENV' '$TMP/d-logs.out' && grep -q 'status=401' '$TMP/d-logs.out' && grep -q 'credential.resolve.*gh login.*after 1 failed' '$TMP/d-logs.out'"
 finish d "$PATH" GH_CONFIG_DIR="$E2E_GH_CONFIG_DIR" "$OWNER_ENV=$GARBAGE"
+fi
 
 echo "== E: every credential rejected: one error listing each source"
 read -r rc E_T < <(install_in e "$NOGH" CONSONA_TOKEN="$GARBAGE" "$OWNER_ENV=${GARBAGE%????}beef")
@@ -220,7 +239,7 @@ echo "== F: no secure store: token add fails clearly, nothing written"
 printf '%s' "$GARBAGE" | run_in f "$NOGH" -- "$BIN" token add x --no-verify > "$TMP/f-add.out" 2>&1; rc=$?
 show "$TMP/f-add.out"
 check "F: token add without a Secret Service fails (rc=$rc) pointing at env vars" bash -c "[ $rc -ne 0 ] && grep -q 'CONSONA_TOKEN' '$TMP/f-add.out' && grep -qi 'plaintext' '$TMP/f-add.out'"
-check "F: no index file and no token anywhere under its HOME" bash -c "[ ! -e '$TMP/f-home/.config/consona/tokens.json' ] && ! grep -rqF -- '$GARBAGE' '$TMP/f-home'"
+check "F: no index file and no token anywhere under its HOME" bash -c "[ ! -e '$TMP/f-home/.config/consona/tokens.json' ] && [ ! -e '$TMP/f-home/Library/Application Support/consona/tokens.json' ] && ! grep -rqF -- '$GARBAGE' '$TMP/f-home'"
 
 echo "== leaks: the real token is in no file written by any scenario"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | grep -v "^$TMP/bin/" | wc -l)
