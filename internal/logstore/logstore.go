@@ -26,38 +26,41 @@ import (
 
 // Event names.
 const (
-	EvInstallResolve    = "install.resolve"
-	EvInstallFetch      = "install.fetch"
-	EvBuildStart        = "build.start"
-	EvBuildFinish       = "build.finish"
-	EvDaemonStart       = "daemon.start"
-	EvDaemonStop        = "daemon.stop"
-	EvRegistryRedirect  = "registry.redirect"
-	EvAuditFilter       = "audit.filter"
-	EvAuthForward       = "auth.forward"
-	EvPeerLookup        = "peer.lookup" // the npm process behind a public write/auth request (result ok | partial | fallback | refused)
-	EvCredentialResolve = "credential.resolve"
-	EvCredentialFail    = "credential.fail"
-	EvTokenAdd          = "token.add"
-	EvTokenRemove       = "token.remove"
-	EvTokenTest         = "token.test"
-	EvSetup             = "setup"
-	EvSourceResolve     = "source.resolve"   // a private name resolved: fields.source = local | ssh | github
-	EvSourceFail        = "source.fail"      // no source had it (fields.tried lists where consona looked)
-	EvLocalRegister     = "local.register"   // consona register
-	EvLocalUnregister   = "local.unregister" // consona unregister
-	EvRemoteAdd         = "remote.add"
-	EvRemoteRemove      = "remote.remove"
-	EvRemoteTest        = "remote.test"
-	EvSSHProbe          = "ssh.probe" // a remote's package list was fetched (failures at warn)
-	EvLogstore          = "logstore"
-	EvError             = "error"
+	EvInstallResolve     = "install.resolve"
+	EvInstallFetch       = "install.fetch"
+	EvBuildStart         = "build.start"
+	EvBuildFinish        = "build.finish"
+	EvDaemonStart        = "daemon.start"
+	EvDaemonStop         = "daemon.stop"
+	EvRegistryRedirect   = "registry.redirect"
+	EvAuditFilter        = "audit.filter"
+	EvAuthForward        = "auth.forward"
+	EvPeerLookup         = "peer.lookup" // the npm process behind a public write/auth request (result ok | partial | fallback | refused)
+	EvCredentialResolve  = "credential.resolve"
+	EvCredentialFail     = "credential.fail"
+	EvTokenAdd           = "token.add"
+	EvTokenRemove        = "token.remove"
+	EvTokenTest          = "token.test"
+	EvSetup              = "setup"
+	EvSourceResolve      = "source.resolve"       // a private name resolved: fields.source = local | ssh | github
+	EvSourceFail         = "source.fail"          // no source had it (fields.tried lists where consona looked)
+	EvSourceNameMismatch = "source.name_mismatch" // package.json names another package than the one requested (warn)
+	EvSourceRedirect     = "source.redirect"      // the GitHub repo was renamed or transferred; requests are redirected (warn)
+	EvSourceTagMoved     = "source.tag_moved"     // a version's tag now points at another commit than an earlier build (warn)
+	EvLocalRegister      = "local.register"       // consona register
+	EvLocalUnregister    = "local.unregister"     // consona unregister
+	EvRemoteAdd          = "remote.add"
+	EvRemoteRemove       = "remote.remove"
+	EvRemoteTest         = "remote.test"
+	EvSSHProbe           = "ssh.probe" // a remote's package list was fetched (failures at warn)
+	EvLogstore           = "logstore"
+	EvError              = "error"
 )
 
 // Events is the enumeration of valid event names.
 var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFinish, EvDaemonStart, EvDaemonStop,
 	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvPeerLookup, EvCredentialResolve, EvCredentialFail,
-	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvLocalRegister, EvLocalUnregister,
+	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvSourceNameMismatch, EvSourceRedirect, EvSourceTagMoved, EvLocalRegister, EvLocalUnregister,
 	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvLogstore, EvError}
 
 // Entry is one event. Both backends store exactly these fields.

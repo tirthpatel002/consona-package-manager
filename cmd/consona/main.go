@@ -170,6 +170,9 @@ func run(args []string) int {
 		if code == 0 && cmdName == "install" {
 			localcli.AfterInstall(ctx, cfg, npm, npmBase, append([]string{cmdName}, args[1:]...), start)
 		}
+		for _, m := range daemon.WarningsSince(cfg, start) {
+			fmt.Fprintln(os.Stderr, "consona: warning:", m)
+		}
 		if code != 0 {
 			for _, m := range daemon.ErrorsSince(cfg, start) {
 				fmt.Fprintln(os.Stderr, "consona:", m)

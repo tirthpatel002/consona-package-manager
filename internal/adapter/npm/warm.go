@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
 )
@@ -68,21 +70,86 @@ func warm(baseURL string, names []string) {
 	}
 }
 
+// defaultWarmTTL is how long a package counts as "warmed recently": a
+// repeated packument or /-/warm request within this window does not walk
+// it (or its dependencies) again. It matches the engine's version-list
+// memo, so a second walk would only find memoised data anyway.
+const defaultWarmTTL = 30 * time.Second
+
+// warmWalk is one dependency walk. Its visited set is shared by every
+// goroutine of the walk, so a dependency cycle (a -> b -> a) ends after
+// each package has been visited once.
+type warmWalk struct {
+	mu      sync.Mutex
+	visited map[string]bool
+}
+
+func newWarmWalk(seed ...string) *warmWalk {
+	w := &warmWalk{visited: map[string]bool{}}
+	for _, n := range seed {
+		w.visited[n] = true
+	}
+	return w
+}
+
+// visit reports whether n is new to this walk (and marks it visited).
+func (w *warmWalk) visit(n string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.visited[n] {
+		return false
+	}
+	w.visited[n] = true
+	return true
+}
+
+// claimWarm reports whether name should be warmed now: false when it was
+// warmed within the handler's warm TTL (by this or any other walk).
+func (h *handler) claimWarm(name string) bool {
+	ttl := h.warmTTL
+	if ttl == 0 {
+		ttl = defaultWarmTTL
+	}
+	now := time.Now()
+	h.warmMu.Lock()
+	defer h.warmMu.Unlock()
+	if h.warmed == nil {
+		h.warmed = map[string]time.Time{}
+	}
+	if t, ok := h.warmed[name]; ok && now.Sub(t) < ttl {
+		return false
+	}
+	if len(h.warmed) > 4096 { // bound the map: drop expired entries
+		for k, t := range h.warmed {
+			if now.Sub(t) >= ttl {
+				delete(h.warmed, k)
+			}
+		}
+	}
+	h.warmed[name] = now
+	return true
+}
+
 // warmRefs resolves packages in the background, then their routed private
 // dependencies, so npm's later requests are served from memory. For
 // packages with a build step it also starts building the latest version,
-// the one npm most often picks.
+// the one npm most often picks. The whole walk shares one visited set,
+// and packages warmed recently are skipped, so cycles terminate and
+// repeated requests do not start new walks.
 func (h *handler) warmRefs(names []string) {
-	scopes := privateScopes()
+	h.walk(names, privateScopes(), newWarmWalk())
+}
+
+func (h *handler) walk(names []string, scopes map[string]bool, w *warmWalk) {
 	for _, n := range names {
 		ref, ok := privateRef(n, scopes)
-		if !ok {
+		if !ok || !w.visit(n) || !h.claimWarm(n) {
 			continue
 		}
 		go func(n string, ref core.Ref) {
 			if pkgs, err := h.e.Packages(context.Background(), h.b, ref, n); err == nil {
 				h.prebuild(ref, n, pkgs)
-				h.warmDeps(pkgs, scopes)
+				h.walk(depNames(pkgs, scopes), scopes, w)
 			}
 		}(n, ref)
 	}
@@ -109,8 +176,14 @@ func latest(pkgs []*core.Version) *core.Version {
 	return nil
 }
 
-// warmDeps prefetches routed private dependencies of the given versions.
-func (h *handler) warmDeps(pkgs []*core.Version, scopes map[string]bool) {
+// warmDeps prefetches routed private dependencies of name's versions (one
+// walk; name itself counts as visited).
+func (h *handler) warmDeps(name string, pkgs []*core.Version, scopes map[string]bool) {
+	h.walk(depNames(pkgs, scopes), scopes, newWarmWalk(name))
+}
+
+// depNames lists the routed private dependencies of the given versions.
+func depNames(pkgs []*core.Version, scopes map[string]bool) []string {
 	seen := map[string]bool{}
 	var names []string
 	for _, p := range pkgs {
@@ -129,7 +202,5 @@ func (h *handler) warmDeps(pkgs []*core.Version, scopes map[string]bool) {
 			}
 		}
 	}
-	if len(names) > 0 {
-		h.warmRefs(names)
-	}
+	return names
 }

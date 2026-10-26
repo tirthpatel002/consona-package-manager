@@ -31,8 +31,9 @@ type Source struct {
 	Client *http.Client
 	Now    func() time.Time // tests
 
-	mu   sync.Mutex
-	pref map[string]string // owner -> source label that last worked
+	mu        sync.Mutex
+	pref      map[string]string // owner -> source label that last worked
+	redirects map[string]string // "owner/repo" (lower) -> the repo's current full name, once seen redirected
 }
 
 // New returns a Source using the default credential resolver. It never
@@ -111,6 +112,9 @@ func (s *Source) get(ctx context.Context, owner, repo, path, accept string) (*ht
 				}
 				logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "info", Owner: owner, Repo: repo,
 					CredentialSource: c.Source, Result: "ok", HTTPStatus: resp.StatusCode, Message: msg})
+			}
+			if repo != "" {
+				s.checkRedirect(ctx, owner, repo, path, resp, c.Value)
 			}
 			return resp, nil
 		}
@@ -329,4 +333,75 @@ func (s *Source) Owners(ctx context.Context) ([]string, error) {
 		return nil, e
 	}
 	return owners, nil
+}
+
+// checkRedirect notices that GitHub answered a request for owner/repo
+// from another repo (the repo was renamed or transferred, and GitHub
+// redirects the old name): it looks up the current name once and warns,
+// in the daemon log, the log store and the install summary.
+func (s *Source) checkRedirect(ctx context.Context, owner, repo, path string, resp *http.Response, tok string) {
+	if resp.Request == nil || resp.Request.URL == nil {
+		return
+	}
+	want, err := url.Parse(s.API + path)
+	// Only a same-host redirect is a rename/transfer (tarballs redirect
+	// to codeload.github.com, which is normal).
+	if err != nil || resp.Request.URL.Path == want.Path || !strings.EqualFold(resp.Request.URL.Host, want.Host) {
+		return
+	}
+	prefix := strings.TrimSuffix(strings.TrimSuffix(want.Path, strings.SplitN(path, "?", 2)[0]), "/")
+	final := strings.TrimPrefix(resp.Request.URL.Path, prefix)
+	key := strings.ToLower(owner + "/" + repo)
+	s.mu.Lock()
+	cur, known := s.redirects[key]
+	s.mu.Unlock()
+	if !known {
+		cur = currentName(final)
+		if cur == "" && strings.HasPrefix(final, "/repositories/") {
+			id := strings.SplitN(strings.TrimPrefix(final, "/repositories/"), "/", 2)[0]
+			if r, err := s.do(ctx, "/repositories/"+url.PathEscape(id), "application/vnd.github+json", tok); err == nil {
+				var m struct {
+					FullName string `json:"full_name"`
+				}
+				if r.StatusCode/100 == 2 {
+					_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&m)
+				}
+				r.Body.Close()
+				cur = m.FullName
+			}
+		}
+		s.mu.Lock()
+		if s.redirects == nil {
+			s.redirects = map[string]string{}
+		}
+		s.redirects[key] = cur
+		s.mu.Unlock()
+	}
+	if strings.EqualFold(cur, owner+"/"+repo) {
+		return
+	}
+	to := "another repo (GitHub redirects the old name)"
+	if cur != "" {
+		to = "github.com/" + cur
+	}
+	msg := fmt.Sprintf("github.com/%s/%s was renamed or transferred to %s; consona follows GitHub's redirect for now, "+
+		"but update the dependency to the new name before the old one is reused or the redirect goes away", owner, repo, to)
+	if cur != "" {
+		if o, n, ok := strings.Cut(cur, "/"); ok {
+			msg += fmt.Sprintf(" (@%s/%s)", strings.ToLower(o), strings.ToLower(n))
+		}
+	}
+	core.Warn("redirect|"+key, logstore.Entry{Event: logstore.EvSourceRedirect, Ecosystem: "github", Owner: owner, Repo: repo,
+		Result: "redirected", HTTPStatus: resp.StatusCode, Message: msg, Fields: map[string]any{"requested": owner + "/" + repo, "current": cur}})
+}
+
+// currentName is "owner/name" when a redirected path is a /repos/ path.
+func currentName(p string) string {
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(parts) >= 3 && parts[0] == "repos" {
+		o, _ := url.PathUnescape(parts[1])
+		n, _ := url.PathUnescape(parts[2])
+		return o + "/" + n
+	}
+	return ""
 }

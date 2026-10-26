@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
@@ -41,6 +42,12 @@ type handler struct {
 
 	upstreamURL string // tests only; default Upstream()
 	noWarm      bool   // tests only: no background prebuild/prefetch
+
+	warmTTL time.Duration // 0: defaultWarmTTL (see claimWarm)
+	warmMu  sync.Mutex
+	warmed  map[string]time.Time // package name -> when it was last warmed
+
+	buildWait time.Duration // 0: BuildWait() (see awaitLatest); <0: never wait
 }
 
 // authFor is the Authorization to send upstream. npm holds a placeholder
@@ -244,6 +251,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if npmpack.FileName(name, p.Version) != file {
 				continue
 			}
+			h.checkName(ref, name, p)
 			bl := p.Built
 			if bl == nil {
 				if bl, err = h.e.Build(r.Context(), h.b, ref, name, p); err != nil {
@@ -268,9 +276,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.noWarm {
-		go h.prebuild(ref, name, pkgs)
-		go h.warmDeps(pkgs, scopes)
+		go h.warmDeps(name, pkgs, scopes)
 	}
+	h.checkName(ref, name, latest(pkgs))
+	pkgs = h.awaitLatest(r.Context(), ref, name, pkgs)
 	body, err := Packument(name, h.base, pkgs)
 	if err != nil {
 		jsonErr(w, http.StatusInternalServerError, err.Error())
@@ -337,8 +346,9 @@ func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err err
 }
 
 // Packument renders the npm registry document for a package. Versions not
-// built yet carry their declared manifest and tarball URL without hashes;
-// npm then records the integrity of the tarball it downloads.
+// built yet carry their declared manifest and tarball URL without hashes
+// (the handler first waits a bounded time for the latest version's build,
+// see awaitLatest, so that one normally has them).
 func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 	versions := map[string]any{}
 	var list []string

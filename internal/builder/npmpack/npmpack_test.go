@@ -133,4 +133,29 @@ func TestBuildRunsPrepare(t *testing.T) {
 	if !errors.As(err, &be) || !strings.Contains(string(be.Output), "boom-output") {
 		t.Fatalf("want BuildError with output, got %v", err)
 	}
+	if be.Script != `"prepare" script` {
+		t.Fatalf("failing script %q, want the prepare script", be.Script)
+	}
+}
+
+// The failing lifecycle script is named from npm's output.
+func TestFailedScript(t *testing.T) {
+	dir := "/tmp/src/package"
+	install := []string{"install", "--include=dev"}
+	for _, c := range []struct {
+		args []string
+		out  string
+		want string
+	}{
+		{install, "\n> @o/x@1.0.0 prepare\n> tsc\n\nerror TS2322\nnpm error code 2\nnpm error path /tmp/src/package\nnpm error command failed\n", `"prepare" script`},
+		{install, "> @o/x@1.0.0 preinstall\n> ok\n> @o/x@1.0.0 install\n> node-gyp rebuild\nnpm error path /tmp/src/package\n", `"install" script`},
+		{install, "npm error code 1\nnpm error path /tmp/src/package/node_modules/dep\nnpm error command failed\n", "install script of dependency node_modules/dep"},
+		{install, "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/nope\n", ""},
+		{[]string{"run", "prepack"}, "> @o/x@1.0.0 prepack\n> exit 1\n", `"prepack" script`},
+		{[]string{"pack", "--ignore-scripts"}, "boom", ""},
+	} {
+		if got := failedScript(c.args, []byte(c.out), dir); got != c.want {
+			t.Errorf("%v %q: got %q, want %q", c.args, c.out, got, c.want)
+		}
+	}
 }
