@@ -61,6 +61,17 @@ func (h *handler) authFor(r *http.Request, up string) (string, login, *client) {
 	return lg.header, lg, c
 }
 
+// redirect sends npm to the upstream registry for a read it can do itself.
+func (h *handler) redirect(w http.ResponseWriter, r *http.Request, up string) {
+	target := up + r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+	logstore.LogQuiet(logstore.Entry{Event: logstore.EvRegistryRedirect, Level: "debug", Ecosystem: "npm",
+		Package: pkgName(r.URL.Path), HTTPStatus: http.StatusFound, Result: "redirect", Message: r.Method + " " + r.URL.Path})
+}
+
 // unscopedPackage matches /name and /name/-/file.tgz.
 func unscopedPackage(p string) bool {
 	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
@@ -194,19 +205,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		up := h.upstream()
+		// Unscoped packages on the default registry are public: npm is sent
+		// there directly whatever its login, so the npm process is not looked
+		// up (keeps plain installs free of the peer lookup).
+		if read && up+"/" == DefaultUpstream && unscopedPackage(r.URL.Path) {
+			h.redirect(w, r, up)
+			return
+		}
 		auth, lg, c := h.authFor(r, up)
 		if r.Method == http.MethodDelete && r.URL.Path == "/-/user/token/"+Placeholder {
 			h.logout(w, r, up, lg, c)
 			return
 		}
-		if read && (auth == "" || (up+"/" == DefaultUpstream && unscopedPackage(r.URL.Path))) {
-			target := up + r.URL.EscapedPath()
-			if r.URL.RawQuery != "" {
-				target += "?" + r.URL.RawQuery
-			}
-			http.Redirect(w, r, target, http.StatusFound)
-			logstore.LogQuiet(logstore.Entry{Event: logstore.EvRegistryRedirect, Level: "debug", Ecosystem: "npm",
-				Package: pkgName(r.URL.Path), HTTPStatus: http.StatusFound, Result: "redirect", Message: r.Method + " " + r.URL.Path})
+		if read && auth == "" {
+			h.redirect(w, r, up)
 			return
 		}
 		start := time.Now()

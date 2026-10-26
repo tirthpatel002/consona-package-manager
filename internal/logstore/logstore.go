@@ -35,6 +35,7 @@ const (
 	EvRegistryRedirect  = "registry.redirect"
 	EvAuditFilter       = "audit.filter"
 	EvAuthForward       = "auth.forward"
+	EvPeerLookup        = "peer.lookup" // the npm process behind a public write/auth request (result ok | partial | fallback | refused)
 	EvCredentialResolve = "credential.resolve"
 	EvCredentialFail    = "credential.fail"
 	EvTokenAdd          = "token.add"
@@ -55,7 +56,7 @@ const (
 
 // Events is the enumeration of valid event names.
 var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFinish, EvDaemonStart, EvDaemonStop,
-	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvCredentialResolve, EvCredentialFail,
+	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvPeerLookup, EvCredentialResolve, EvCredentialFail,
 	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvLocalRegister, EvLocalUnregister,
 	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvLogstore, EvError}
 

@@ -14,9 +14,10 @@ import (
 // The daemon sends the user's existing login for the upstream registry,
 // found the way npm finds it: npm_config_* environment variables, then the
 // project .npmrc, the user npmrc, the global npmrc, with ${VAR} references
-// expanded. On Linux the daemon looks at the npm process on the other end
-// of the connection (same user only) for its environment and working
-// directory; elsewhere it uses its own environment and no project npmrc.
+// expanded. On Linux and macOS the daemon looks at the npm process on the
+// other end of the connection (same user only, see internal/procinfo) for
+// its environment and working directory; if that cannot be determined (or
+// on other systems) it uses its own environment and no project npmrc.
 
 // client is what npm's config depends on: its environment, working
 // directory and node binary.
