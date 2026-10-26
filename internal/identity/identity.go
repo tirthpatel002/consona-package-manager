@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,20 +45,8 @@ type Identity struct {
 	Updated  time.Time `json:"updated"`
 }
 
-// ConfigDir is consona's config directory: $CONSONA_CONFIG_DIR, else
-// <user config dir>/consona (~/.config/consona, ~/Library/Application
-// Support/consona, %AppData%\consona).
-func ConfigDir() string {
-	if d := os.Getenv("CONSONA_CONFIG_DIR"); d != "" {
-		return d
-	}
-	d, err := os.UserConfigDir()
-	if err != nil {
-		h, _ := os.UserHomeDir()
-		d = filepath.Join(h, ".config")
-	}
-	return filepath.Join(d, "consona")
-}
+// ConfigDir is consona's config directory (see internal/config).
+func ConfigDir() string { return config.Dir() }
 
 // Path is the identity file.
 func Path() string { return filepath.Join(ConfigDir(), "identity.json") }
@@ -138,51 +127,11 @@ func NewUUID() string {
 }
 
 // EnsureDir creates dir (and parents) and makes dir itself 0700.
-func EnsureDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	return os.Chmod(dir, 0o700)
-}
+func EnsureDir(dir string) error { return config.EnsureDir(dir) }
 
-// WriteFileAtomic writes data to path via a synced temp file and rename,
-// creating the directory 0700. The file gets perm (normally 0600).
+// WriteFileAtomic writes data atomically (see config.WriteFileAtomic).
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	if err := EnsureDir(filepath.Dir(path)); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			tmp.Close()
-			os.Remove(name)
-		}
-	}()
-	if err := tmp.Chmod(perm); err != nil && runtime.GOOS != "windows" {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	ok = true
-	return nil
+	return config.WriteFileAtomic(path, data, perm)
 }
 
 // Lock takes an advisory lock file next to path (created exclusively),

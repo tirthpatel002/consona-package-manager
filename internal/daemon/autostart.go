@@ -56,9 +56,10 @@ func AutostartInstalled(c Config) bool {
 // are read at request time from the OS secure store or gh.
 func (c Config) serviceEnv() [][2]string {
 	env := [][2]string{{"CONSONA_HOME", c.Home}, {"CONSONA_PORT", strconv.Itoa(c.Port)}, {"PATH", os.Getenv("PATH")}}
-	for _, k := range []string{"CONSONA_CONFIG_DIR", "GH_CONFIG_DIR", "CONSONA_LOG_BACKEND", "CONSONA_LOG_MAX_AGE", "CONSONA_LOG_MAX_SIZE_MB"} {
+	for _, k := range []string{"CONSONA_CONFIG_DIR", "GH_CONFIG_DIR", "CONSONA_LOG_DIR", "CONSONA_LOG_BACKEND", "CONSONA_LOG_MAX_AGE", "CONSONA_LOG_MAX_SIZE_MB",
+		"CONSONA_SSH_CONFIG", "CONSONA_SSH_AUTODETECT", "CONSONA_SSH_CONTROL", "CONSONA_REMOTE_CMD"} {
 		if v := os.Getenv(k); v != "" {
-			if strings.HasSuffix(k, "_DIR") {
+			if strings.HasSuffix(k, "_DIR") || k == "CONSONA_SSH_CONFIG" {
 				if abs, err := filepath.Abs(v); err == nil {
 					v = abs
 				}

@@ -50,6 +50,13 @@ var version = "0.10.0"
 
 func main() { os.Exit(run(os.Args[1:])) }
 
+// logsEvents are the commands that write to the event log. Read-only and
+// informational commands (version, help, whoami, logs, ...) never create
+// the log store.
+var logsEvents = map[string]bool{"setup": true, "uninstall": true, "install": true, "i": true, "audit": true,
+	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true,
+	"remote-serve": true, "which": true}
+
 func fail(format string, a ...any) int {
 	fmt.Fprintf(os.Stderr, "consona: "+format+"\n", a...)
 	return 1
@@ -61,16 +68,16 @@ func run(args []string) int {
 		return 2
 	}
 	localcli.Version = version
-	if code, ok := localcli.Run(args); ok { // init, register, remote, ...
-		return code
-	}
 	cfg := daemon.Load()
-	ctx := context.Background()
-	if args[0] != "daemon" && args[0] != "logs" {
+	if logsEvents[args[0]] { // commands that record events (the daemon opens its own)
 		if logs := daemon.OpenLogs(cfg, false); logs != nil {
 			defer logs.Close()
 		}
 	}
+	if code, ok := localcli.Run(args); ok { // init, register, remote, ...
+		return code
+	}
+	ctx := context.Background()
 	npm, _ := core.Lookup("npm")
 	npmBase := cfg.BaseURL() + "/npm/"
 	switch args[0] {

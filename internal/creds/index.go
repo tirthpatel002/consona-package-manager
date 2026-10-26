@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,20 +52,8 @@ type Index struct {
 	Tokens  []Token `json:"tokens"`
 }
 
-// ConfigDir is consona's config directory: $CONSONA_CONFIG_DIR, else
-// <user config dir>/consona (~/.config/consona, ~/Library/Application
-// Support/consona, %AppData%\consona).
-func ConfigDir() string {
-	if d := os.Getenv("CONSONA_CONFIG_DIR"); d != "" {
-		return d
-	}
-	d, err := os.UserConfigDir()
-	if err != nil {
-		h, _ := os.UserHomeDir()
-		d = filepath.Join(h, ".config")
-	}
-	return filepath.Join(d, "consona")
-}
+// ConfigDir is consona's config directory (see internal/config).
+func ConfigDir() string { return config.Dir() }
 
 // IndexPath is where the token index lives.
 func IndexPath() string { return filepath.Join(ConfigDir(), "tokens.json") }
@@ -117,38 +106,11 @@ func LoadIndex(path string) (*Index, error) {
 // in a 0700 directory.
 func (ix *Index) Save(path string) error {
 	ix.Version = 1
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(ix, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".tokens-*.json")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return config.WriteFileAtomic(path, append(b, '\n'), 0o600)
 }
 
 // Find returns the token named n (case-sensitive), or nil.

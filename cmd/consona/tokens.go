@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
 	"io"
 	"os"
 	"strings"
@@ -355,9 +356,12 @@ func (t *tokenCmd) list() int {
 		}
 		tw.Flush()
 	}
+	kv := [][2]string{{"index", t.indexPath}, {"secrets", "OS secure store, service " + creds.Service}}
 	if vars := tokenEnvVars(); len(vars) > 0 {
-		fmt.Fprintf(t.stdout, "also in this shell's environment: %s\n", strings.Join(vars, ", "))
+		kv = append(kv, [2]string{"env", strings.Join(vars, ", ") + " (also used, by name only)"})
 	}
+	fmt.Fprintln(t.stdout)
+	config.PrintKV(t.stdout, kv...)
 	return 0
 }
 

@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"os"
 	"path/filepath"
 	"sort"
@@ -177,8 +179,12 @@ func cmdWhoami() int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	fmt.Printf("username: @%s\ndevice:   %s\nhost:     %s (%s/%s)\ncreated:  %s\nconfig:   %s\n", id.Username, id.Device.ID, id.Device.Hostname, id.Device.OS, id.Device.Arch,
-		id.Device.Created.Local().Format("2006-01-02 15:04 MST"), identity.ConfigDir())
+	config.PrintKV(os.Stdout,
+		[2]string{"username", "@" + id.Username},
+		[2]string{"device", id.Device.ID},
+		[2]string{"host", fmt.Sprintf("%s (%s/%s)", id.Device.Hostname, id.Device.OS, id.Device.Arch)},
+		[2]string{"created", id.Device.Created.Local().Format("2006-01-02 15:04 MST")},
+		[2]string{"config", config.Dir()})
 	return 0
 }
 
@@ -284,6 +290,9 @@ func cmdRegister(ctx context.Context, args []string) int {
 	if err != nil {
 		return fail("registered, but: %v", err)
 	}
+	logstore.Log(logstore.Entry{Event: logstore.EvLocalRegister, Level: "info", Ecosystem: "npm", Package: name, Owner: scope, Repo: pkg,
+		Version: cur.Version, Result: "ok", Message: "registered " + name + " -> " + dir,
+		Fields: map[string]any{"path": dir, "device": id.Device.Short(), "replaced": len(removed)}})
 	fmt.Printf("consona: registered %s -> %s (device %s)\nconsona: current version %s (changes to the folder publish a new version on the next install)\n", name, dir, id.Device.Short(), cur.Version)
 	if m.Name != "" && !strings.EqualFold(m.Name, name) {
 		fmt.Printf("consona: note: package.json says %q; it is served as %s (the packed package.json is renamed, your folder is not touched)\n", m.Name, name)
@@ -345,6 +354,9 @@ func cmdUnregister(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
+	scope, pkg := split(e.Name)
+	logstore.Log(logstore.Entry{Event: logstore.EvLocalUnregister, Level: "info", Ecosystem: "npm", Package: e.Name, Owner: scope, Repo: pkg,
+		Result: "ok", Message: "unregistered " + e.Name, Fields: map[string]any{"path": e.Path}})
 	fmt.Printf("consona: unregistered %s (folder %s left as is)\n", e.Name, e.Path)
 	return 0
 }
@@ -376,8 +388,10 @@ func cmdRemote(ctx context.Context, args []string) int {
 			}
 		}
 		if err := store.Add(r, hasKey(opt, "replace")); err != nil {
+			logstore.Log(logstore.Entry{Event: logstore.EvRemoteAdd, Level: "error", Result: "fail", Message: err.Error(), Fields: remoteFields(r)})
 			return fail("%v", err)
 		}
+		logstore.Log(logstore.Entry{Event: logstore.EvRemoteAdd, Level: "info", Result: "ok", Message: "added remote " + r.Label(), Fields: remoteFields(r)})
 		fmt.Printf("consona: added remote %s (%s)\n", r.Name, r.Label())
 		if hasKey(opt, "no-test") {
 			return 0
@@ -414,6 +428,8 @@ func cmdRemote(ctx context.Context, args []string) int {
 		if err := store.Remove(args[0]); err != nil {
 			return fail("%v", err)
 		}
+		logstore.Log(logstore.Entry{Event: logstore.EvRemoteRemove, Level: "info", Result: "ok", Message: "removed remote " + args[0],
+			Fields: map[string]any{"remote": args[0]}})
 		fmt.Printf("consona: removed remote %s\n", args[0])
 		return 0
 	case "test":
@@ -466,6 +482,15 @@ func testRemotes(ctx context.Context, rs []sshremote.Remote) int {
 		t := time.Now()
 		st := m.Probe(ctx, r)
 		fmt.Printf("consona: remote %s (%s): %s [%s]\n", r.Name, r.Label(), describeState(st), time.Since(t).Round(time.Millisecond))
+		e := logstore.Entry{Event: logstore.EvRemoteTest, Level: "info", Result: "ok", DurationMS: st.Latency.Milliseconds(),
+			Message: "remote " + r.Label() + ": " + describeState(st), Fields: remoteFields(r)}
+		if !st.OK {
+			e.Level, e.Result, e.ErrorCode = "warn", "fail", "unreachable"
+			if st.NoConsona {
+				e.ErrorCode = "no-consona"
+			}
+		}
+		logstore.Log(e)
 		if !st.OK {
 			code = 1
 			continue
@@ -503,11 +528,14 @@ func cmdServe(ctx context.Context) int {
 // NewChain builds the resolution chain: local folders, ssh remotes, GitHub.
 func NewChain(home string) *chain.Chain {
 	idx := localindex.Open()
-	c := &chain.Chain{Local: local.New(idx, home), Remotes: sshremote.NewManager(home)}
+	c := &chain.Chain{Local: local.New(idx, home), Remotes: sshremote.NewManager(home), Sink: logSink{}}
+	c.Remotes.OnProbe = logProbe
 	if id, err := identity.Load(); err == nil {
 		c.ThisDevice = id.Device.Short()
 	}
-	c.GitHub = github.New() // never fails: credentials are resolved per request
+	// GitHub never fails here: credentials (CONSONA_TOKEN_<OWNER>, named
+	// tokens, GH_TOKEN, gh, ...) are resolved per request on this machine.
+	c.GitHub = github.New()
 	return c
 }
 
@@ -517,9 +545,12 @@ func NewChain(home string) *chain.Chain {
 // does not wait for ssh.
 func NewDaemonSource(home string) core.Source {
 	c := NewChain(home)
-	npm.ExtraScopes = c.PrivateScopes
-	if c.GitHubError != nil {
-		fmt.Fprintf(os.Stderr, "consona: GitHub source off: %v\n", c.GitHubError)
+	npm.ExtraScopes = func() map[string]bool { // + this device's consona username
+		s := c.PrivateScopes()
+		if id, err := identity.Load(); err == nil && id.Username != "" {
+			s[strings.ToLower(id.Username)] = true
+		}
+		return s
 	}
 	go c.Remotes.Warm(context.Background())
 	return c
@@ -556,11 +587,12 @@ func cmdWhich(ctx context.Context, args []string) int {
 	ref := core.Ref{Owner: scope, Name: pkg}
 	c := NewChain(core.Home())
 	var got []string
-	c.Sink = sinkFunc(func(r chain.Resolution) { got = append(got, r.String()) })
+	c.Sink = logSink{also: sinkFunc(func(r chain.Resolution) { got = append(got, r.String()) })}
 	t := time.Now()
 	if _, err := c.Revisions(ctx, ref); err != nil {
-		if errors.Is(err, core.ErrNotFound) {
-			return fail("%s: not found (looked in: %s)", args[0], strings.Join(c.Places(ref), ", "))
+		var ae *github.AccessError
+		if errors.Is(err, core.ErrNotFound) || (errors.As(err, &ae) && len(ae.Attempts) == 0) {
+			return fail("%s: not found\n  %v", args[0], err)
 		}
 		return fail("%v", err)
 	}

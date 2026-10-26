@@ -81,3 +81,51 @@ func TestExtraScopesAndOldLiveTarball(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// Audits never send names of registered folders, ssh-remote packages or
+// the consona username upstream, even when the npmrc does not route them.
+func TestAuditHidesLocalAndRemoteNames(t *testing.T) {
+	routeScope(t, "o")
+	ExtraScopes = func() map[string]bool { return map[string]bool{"me": true, "devbox": true} }
+	defer func() { ExtraScopes = nil }()
+	var mu sync.Mutex
+	var sent []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		sent = append(sent, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}"))
+	}))
+	defer up.Close()
+	h := &handler{e: core.NewEngine(&liveSource{ver: "1.0.0"}, t.TempDir()), b: fakeBuilder{}, upstreamURL: up.URL, noWarm: true}
+	srv := httptest.NewServer(h)
+	h.base = srv.URL
+	defer srv.Close()
+	post := func(path, body string) {
+		resp, err := http.Post(srv.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	post(bulkPath, `{"@me/lib":["1.0.0-local.1.haaaaaaaa"],"@devbox/tool":["3.0.0"],"@o/x":["1.0.0"],"lodash":["4.17.21"]}`)
+	post(quickPath, `{"name":"@me/app","requires":{"@me/lib":"*","@devbox/tool":"*","lodash":"*"},"dependencies":{"@me/lib":{"version":"1.0.0"},"@devbox/tool":{"version":"3.0.0"},"lodash":{"version":"4.17.21"}}}`)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 2 {
+		t.Fatalf("upstream got %d requests", len(sent))
+	}
+	for _, b := range sent {
+		for _, private := range []string{"@me/", "@devbox/", "@o/"} {
+			if strings.Contains(b, private) {
+				t.Fatalf("private name %s sent upstream: %s", private, b)
+			}
+		}
+		if !strings.Contains(b, "lodash") {
+			t.Fatalf("public name missing: %s", b)
+		}
+	}
+}

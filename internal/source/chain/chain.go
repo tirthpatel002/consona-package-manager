@@ -46,6 +46,38 @@ func (r Resolution) String() string {
 // ones in memory for `consona install` to print.
 type EventSink interface{ Resolved(Resolution) }
 
+// FailureSink is optionally implemented by an EventSink to also receive
+// names no source could resolve, with what was tried.
+type FailureSink interface {
+	ResolveFailed(name string, tried []string, err error)
+}
+
+func (c *Chain) failed(name string, err error) error {
+	if fs, ok := c.Sink.(FailureSink); ok && err != nil {
+		fs.ResolveFailed(name, c.tried(), err)
+	}
+	return err
+}
+
+// tried lists the places a name was looked up, with per-remote state.
+func (c *Chain) tried() []string {
+	out := []string{"this device's registered folders: not registered"}
+	if c.Remotes != nil {
+		out = append(out, c.Remotes.Tried()...)
+	}
+	if c.GitHub == nil {
+		out = append(out, "GitHub not available ("+errString(c.GitHubError)+")")
+	}
+	return out
+}
+
+// alsoTried appends the non-GitHub places to a GitHub error, keeping it
+// wrapped (errors.Is/As still see core.ErrNotFound, *github.AccessError).
+func (c *Chain) alsoTried(name string, err error) error {
+	t := c.tried() // GitHub itself is described by err
+	return fmt.Errorf("%s: %w\n  Also looked in: %s", name, err, strings.Join(t, "; "))
+}
+
 // Chain implements core.Source, core.Prebuilt and core.Live.
 type Chain struct {
 	Local       *local.Source
@@ -149,10 +181,11 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 	name := pkgName(ref)
 	if e, ok := c.Local.Lookup(ref); ok {
 		revs, err := c.Local.Revisions(ctx, ref)
-		if err == nil {
-			c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "local", Where: e.Path, Device: c.ThisDevice})
+		if err != nil { // local always wins: do not fall through to other sources
+			return nil, c.failed(name, fmt.Errorf("%w (local folders win: ssh remotes and GitHub were not tried)", err))
 		}
-		return revs, err
+		c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "local", Where: e.Path, Device: c.ThisDevice})
+		return revs, nil
 	}
 	type ghResult struct {
 		revs []core.Revision
@@ -172,7 +205,10 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 		if r, st := c.Remotes.Find(ctx, name); r != nil {
 			cancel()
 			revs, err := c.Remotes.Revisions(ctx, *r, ref)
-			if err == nil {
+			if err != nil {
+				return nil, c.failed(name, fmt.Errorf("%s: listed on ssh remote %s, but resolving it there failed (GitHub not tried): %w", name, r.Label(), err))
+			}
+			{
 				dev := ""
 				if st.Device != nil {
 					dev = st.Device.Short()
@@ -183,13 +219,14 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 		}
 	}
 	if ghc == nil {
-		return nil, fmt.Errorf("%s: %w (not registered on this device or any reachable ssh remote; GitHub not available: %s)", name, core.ErrNotFound, errString(c.GitHubError))
+		return nil, c.failed(name, fmt.Errorf("%s: %w; looked in: %s", name, core.ErrNotFound, strings.Join(c.tried(), "; ")))
 	}
 	g := <-ghc
-	if g.err == nil {
-		c.record(Resolution{Name: name, Version: latestVersion(g.revs), Kind: "github", Where: c.GitHub.Describe(ref)})
+	if g.err != nil {
+		return nil, c.failed(name, c.alsoTried(name, g.err))
 	}
-	return g.revs, g.err
+	c.record(Resolution{Name: name, Version: latestVersion(g.revs), Kind: "github", Where: c.GitHub.Describe(ref)})
+	return g.revs, nil
 }
 
 // Fetch dispatches by revision kind.

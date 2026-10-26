@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
 	"log"
 	"net"
 	"net/http"
@@ -56,11 +57,11 @@ func (c Config) identity() string {
 	return hex.EncodeToString(h[:8])
 }
 
-// OpenLogs opens the structured log store in the consona home and makes
+// OpenLogs opens the structured log store (config.LogDir) and makes
 // it the process default (echoing events to the human log if echo).
 // Callers must Close the result.
 func OpenLogs(c Config, echo bool) *logstore.Async {
-	s, err := logstore.Open(logstore.Dir(c.Home))
+	s, err := logstore.Open(config.LogDir())
 	if err != nil {
 		log.Printf("consona: log store unavailable: %v", err)
 		return nil

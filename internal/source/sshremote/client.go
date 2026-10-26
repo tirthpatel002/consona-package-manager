@@ -228,6 +228,10 @@ type Manager struct {
 	ProbeTimeout                             time.Duration // one list probe
 	OpTimeout                                time.Duration // resolve/fetch (may build on the remote)
 
+	// OnProbe, if set, is called after every probe (success or failure),
+	// e.g. to record failures in the event log.
+	OnProbe func(Remote, State)
+
 	mu     sync.Mutex
 	states map[string]*State // by Remote.Key
 	pkgs   map[string]*Package
@@ -324,8 +328,44 @@ func (m *Manager) Probe(ctx context.Context, r Remote) State {
 	m.load()
 	m.states[r.Key()] = st
 	m.save()
+	out := *st
 	m.mu.Unlock()
-	return *st
+	if m.OnProbe != nil {
+		m.OnProbe(r, out)
+	}
+	return out
+}
+
+// Tried describes, per remote in lookup order, what consona knows about
+// it, for "not found" messages: "work (user@host): reachable, does not
+// have it", "pi (from ssh config): unreachable: ...".
+func (m *Manager) Tried() []string {
+	rs := m.Remotes()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.load()
+	var out []string
+	for _, r := range rs {
+		st := m.states[r.Key()]
+		var what string
+		switch {
+		case st == nil:
+			what = "not contacted yet"
+		case st.OK:
+			what = "reachable, does not have it"
+		case st.NoConsona:
+			what = "consona not installed there"
+		default:
+			what = "unreachable: " + firstLine(st.Err)
+		}
+		out = append(out, "ssh remote "+r.Label()+": "+what)
+	}
+	return out
+}
+
+func firstLine(s string) string {
+	l, _, _ := strings.Cut(s, "\n")
+	return l
 }
 
 // freshness: 0 = usable, 1 = usable but refresh in background, 2 = probe now.

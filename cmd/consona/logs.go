@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
 	"io"
 	"os"
 	"strconv"
@@ -38,7 +39,7 @@ func runLogs(cfg daemon.Config, args []string) int {
 		fmt.Print(logsUsage)
 		return 0
 	}
-	s, err := logstore.Open(logstore.Dir(cfg.Home))
+	s, err := logstore.Open(config.LogDir())
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -117,16 +118,18 @@ func runLogs(cfg daemon.Config, args []string) int {
 		if err != nil {
 			return fail("%v", err)
 		}
-		fmt.Printf("backend:  %s\npath:     %s\nentries:  %d\nsize:     %.1f KB\n", in.Backend, in.Path, in.Count, float64(in.Size)/1024)
+		kv := [][2]string{{"backend", in.Backend}, {"path", in.Path}, {"entries", fmt.Sprint(in.Count)},
+			{"size", fmt.Sprintf("%.1f KB", float64(in.Size)/1024)}}
 		if !in.Oldest.IsZero() {
-			fmt.Printf("oldest:   %s\nnewest:   %s\n", in.Oldest.Local().Format(time.RFC3339), in.Newest.Local().Format(time.RFC3339))
+			kv = append(kv, [2]string{"oldest", in.Oldest.Local().Format(time.RFC3339)}, [2]string{"newest", in.Newest.Local().Format(time.RFC3339)})
 		}
 		r := logstore.DefaultRetention()
-		fmt.Printf("retention: %s, %d MB\n", r.MaxAge, r.MaxSize>>20)
+		kv = append(kv, [2]string{"retention", fmt.Sprintf("%s, %d MB", r.MaxAge, r.MaxSize>>20)})
 		if in.Fallback != "" {
-			fmt.Printf("fallback: %s\n", in.Fallback)
+			kv = append(kv, [2]string{"fallback", in.Fallback})
 		}
-		fmt.Printf("human log: %s\n", cfg.LogPath())
+		kv = append(kv, [2]string{"human log", cfg.LogPath()}, [2]string{"config", config.Dir()})
+		config.PrintKV(os.Stdout, kv...)
 		return 0
 	}
 	fmt.Fprint(os.Stderr, logsUsage)

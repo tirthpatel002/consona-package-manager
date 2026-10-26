@@ -41,6 +41,14 @@ const (
 	EvTokenRemove       = "token.remove"
 	EvTokenTest         = "token.test"
 	EvSetup             = "setup"
+	EvSourceResolve     = "source.resolve"   // a private name resolved: fields.source = local | ssh | github
+	EvSourceFail        = "source.fail"      // no source had it (fields.tried lists where consona looked)
+	EvLocalRegister     = "local.register"   // consona register
+	EvLocalUnregister   = "local.unregister" // consona unregister
+	EvRemoteAdd         = "remote.add"
+	EvRemoteRemove      = "remote.remove"
+	EvRemoteTest        = "remote.test"
+	EvSSHProbe          = "ssh.probe" // a remote's package list was fetched (failures at warn)
 	EvLogstore          = "logstore"
 	EvError             = "error"
 )
@@ -48,7 +56,8 @@ const (
 // Events is the enumeration of valid event names.
 var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFinish, EvDaemonStart, EvDaemonStop,
 	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvCredentialResolve, EvCredentialFail,
-	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvLogstore, EvError}
+	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvLocalRegister, EvLocalUnregister,
+	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvLogstore, EvError}
 
 // Entry is one event. Both backends store exactly these fields.
 type Entry struct {
@@ -235,8 +244,9 @@ func ParseAge(v string) (time.Duration, error) {
 	return time.ParseDuration(v)
 }
 
-// Dir is the log store directory inside consona's state dir.
-func Dir(home string) string { return filepath.Join(home, "logs") }
+// Dir is the log store directory under a given base directory (callers
+// normally use config.LogDir, which is <consona config dir>/logs).
+func Dir(base string) string { return filepath.Join(base, "logs") }
 
 // ErrNoSQLite is returned by openSQLite in nosqlite builds.
 var ErrNoSQLite = errors.New("built without SQLite (nosqlite build tag)")

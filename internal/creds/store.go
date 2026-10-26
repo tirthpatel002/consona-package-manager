@@ -8,14 +8,23 @@ package creds
 import (
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 
 	"github.com/zalando/go-keyring"
 )
 
 // Service is the secure-store service name token values are saved under
-// (one entry per token name).
-const Service = "dev.consona.tokens"
+// (one entry per token name). CONSONA_KEYRING_SERVICE overrides it, so
+// tests can use a clearly named throwaway service in the real keychain.
+var Service = serviceName()
+
+func serviceName() string {
+	if s := os.Getenv("CONSONA_KEYRING_SERVICE"); s != "" {
+		return s
+	}
+	return "dev.consona.tokens"
+}
 
 // ErrNoSecret means the secure store has no value for a token name.
 var ErrNoSecret = errors.New("token value not found in the OS secure store")

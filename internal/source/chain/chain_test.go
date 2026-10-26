@@ -116,6 +116,12 @@ func TestGitHubFallbackAndNotFound(t *testing.T) {
 	if !errors.Is(err, core.ErrNotFound) {
 		t.Fatal(err)
 	}
+	// the message names every place that was tried, with the remote's state
+	for _, want := range []string{"@acme/nope", "Also looked in", "this device's registered folders: not registered", "ssh remote vm (u@vm): reachable, does not have it"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing %q in %v", want, err)
+		}
+	}
 	c.GitHub = nil
 	_, err = c.Revisions(context.Background(), core.Ref{Owner: "acme", Name: "nope"})
 	if !errors.Is(err, core.ErrNotFound) || !strings.Contains(err.Error(), "GitHub not available") {
