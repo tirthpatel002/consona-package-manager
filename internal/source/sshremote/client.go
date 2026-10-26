@@ -227,6 +227,8 @@ type Manager struct {
 	ListTTL, StaleTTL, DownTTL, NoConsonaTTL time.Duration
 	ProbeTimeout                             time.Duration // one list probe
 	OpTimeout                                time.Duration // resolve/fetch (may build on the remote)
+	CacheHeaderTimeout                       time.Duration // initial reply timeout for cache fetch (default 5s)
+	CacheTransferTimeout                     time.Duration // payload transfer timeout for cache fetch (default 2m)
 
 	// OnProbe, if set, is called after every probe (success or failure),
 	// e.g. to record failures in the event log.
@@ -246,6 +248,7 @@ func NewManager(home string) *Manager {
 		AutoDetect: os.Getenv("CONSONA_SSH_AUTODETECT") != "0",
 		ListTTL:    60 * time.Second, StaleTTL: 30 * time.Minute, DownTTL: 5 * time.Minute, NoConsonaTTL: 30 * time.Minute,
 		ProbeTimeout: 8 * time.Second, OpTimeout: core.BuildTimeout,
+		CacheHeaderTimeout: 5 * time.Second, CacheTransferTimeout: 2 * time.Minute,
 		states: map[string]*State{}, pkgs: map[string]*Package{}, now: time.Now,
 	}
 }
@@ -583,7 +586,7 @@ func (m *Manager) Warm(ctx context.Context) {
 }
 
 // Fetch implements core.RemoteCache for Manager: it queries remotes in lookup order,
-// skipping recently offline remotes with a short timeout per remote.
+// skipping recently offline remotes with a short initial reply timeout and bounded transfer timeout.
 //
 // Integrity trust note:
 // The remote is a machine configured by the user, but artifacts are verified
@@ -606,76 +609,102 @@ func (m *Manager) Fetch(ctx context.Context, key string, outPath string) (core.R
 			}
 		}
 
-		rctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		start := time.Now()
-		f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			cancel()
-			return core.RemoteCacheResult{}, false, err
+		res, ok, retry := m.fetchFromRemote(ctx, r, key, outPath)
+		if ok {
+			return res, true, nil
 		}
-
-		h512 := sha512.New()
-		var written int64
-		resp, rerr := m.Client.Do(rctx, r, Request{Op: "cache_fetch", Key: key}, func(resp *Response, rd *bufio.Reader) error {
-			if resp.Size <= 0 {
-				return fmt.Errorf("remote sent non-positive size %d", resp.Size)
-			}
-			n, err := io.CopyN(io.MultiWriter(f, h512), rd, resp.Size)
-			written = n
-			if err != nil {
-				return fmt.Errorf("reading cache artifact truncated after %d of %d bytes: %w", n, resp.Size, err)
-			}
-			return nil
-		})
-		ferr := f.Close()
-		cancel()
-
-		if rerr == nil && ferr != nil {
-			rerr = ferr
+		if !retry {
+			return core.RemoteCacheResult{}, false, nil
 		}
-
-		if rerr != nil {
-			_ = os.Remove(outPath)
-			// If ssh failed or timed out, mark remote down
-			if rctx.Err() != nil || strings.Contains(rerr.Error(), "timed out") || strings.Contains(rerr.Error(), "connection") || strings.Contains(rerr.Error(), "Connection") {
-				m.mu.Lock()
-				m.load()
-				m.states[r.Key()] = &State{
-					Name: r.Name, Target: r.Target, Auto: r.Auto, At: m.now(),
-					OK: false, Err: rerr.Error(),
-				}
-				m.save()
-				m.mu.Unlock()
-			}
-			continue
-		}
-
-		if resp == nil || !resp.OK || resp.NotFound {
-			_ = os.Remove(outPath)
-			continue
-		}
-
-		announced := resp.SHA512
-		if resp.Package != nil && resp.Package.SHA512 != "" {
-			announced = resp.Package.SHA512
-		}
-		computed512 := base64.StdEncoding.EncodeToString(h512.Sum(nil))
-		if announced != "" && computed512 != announced {
-			_ = os.Remove(outPath)
-			continue
-		}
-		if resp.Size > 0 && written != resp.Size {
-			_ = os.Remove(outPath)
-			continue
-		}
-
-		return core.RemoteCacheResult{
-			RemoteLabel: r.Label(),
-			SHA512:      announced,
-			Size:        written,
-			Duration:    time.Since(start),
-		}, true, nil
 	}
 	_ = os.Remove(outPath)
 	return core.RemoteCacheResult{}, false, nil
+}
+
+func (m *Manager) fetchFromRemote(ctx context.Context, r Remote, key, outPath string) (res core.RemoteCacheResult, ok bool, retry bool) {
+	headerTimeout := m.CacheHeaderTimeout
+	if headerTimeout <= 0 {
+		headerTimeout = 5 * time.Second
+	}
+	transferTimeout := m.CacheTransferTimeout
+	if transferTimeout <= 0 {
+		transferTimeout = 2 * time.Minute
+	}
+
+	rctx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(headerTimeout, cancel)
+	defer func() {
+		timer.Stop()
+		cancel()
+	}()
+
+	start := time.Now()
+	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return core.RemoteCacheResult{}, false, false
+	}
+
+	h512 := sha512.New()
+	var written int64
+	resp, rerr := m.Client.Do(rctx, r, Request{Op: "cache_fetch", Key: key}, func(resp *Response, rd *bufio.Reader) error {
+		if rctx.Err() != nil {
+			return rctx.Err()
+		}
+		timer.Reset(transferTimeout)
+		if resp.Size <= 0 {
+			return fmt.Errorf("remote sent non-positive size %d", resp.Size)
+		}
+		n, err := io.CopyN(io.MultiWriter(f, h512), rd, resp.Size)
+		written = n
+		if err != nil {
+			return fmt.Errorf("reading cache artifact truncated after %d of %d bytes: %w", n, resp.Size, err)
+		}
+		return nil
+	})
+	ferr := f.Close()
+	if rerr == nil && ferr != nil {
+		rerr = ferr
+	}
+
+	if rerr != nil {
+		_ = os.Remove(outPath)
+		// If ssh failed or timed out, mark remote down
+		if rctx.Err() != nil || strings.Contains(rerr.Error(), "timed out") || strings.Contains(rerr.Error(), "connection") || strings.Contains(rerr.Error(), "Connection") {
+			m.mu.Lock()
+			m.load()
+			m.states[r.Key()] = &State{
+				Name: r.Name, Target: r.Target, Auto: r.Auto, At: m.now(),
+				OK: false, Err: rerr.Error(),
+			}
+			m.save()
+			m.mu.Unlock()
+		}
+		return core.RemoteCacheResult{}, false, true
+	}
+
+	if resp == nil || !resp.OK || resp.NotFound {
+		_ = os.Remove(outPath)
+		return core.RemoteCacheResult{}, false, true
+	}
+
+	announced := resp.SHA512
+	if resp.Package != nil && resp.Package.SHA512 != "" {
+		announced = resp.Package.SHA512
+	}
+	computed512 := base64.StdEncoding.EncodeToString(h512.Sum(nil))
+	if announced != "" && computed512 != announced {
+		_ = os.Remove(outPath)
+		return core.RemoteCacheResult{}, false, true
+	}
+	if resp.Size > 0 && written != resp.Size {
+		_ = os.Remove(outPath)
+		return core.RemoteCacheResult{}, false, true
+	}
+
+	return core.RemoteCacheResult{
+		RemoteLabel: r.Label(),
+		SHA512:      announced,
+		Size:        written,
+		Duration:    time.Since(start),
+	}, true, false
 }

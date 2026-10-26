@@ -173,7 +173,10 @@ func (e *Engine) cached(b Builder, ref Ref, commit, version string) *Built {
 	dir := filepath.Join(e.base(b, ref), commit, version)
 	var a Artifact
 	if bs, err := os.ReadFile(filepath.Join(dir, "artifact.json")); err == nil && json.Unmarshal(bs, &a) == nil {
-		return &Built{Artifact: &a, Path: filepath.Join(dir, a.File)}
+		p := filepath.Join(dir, a.File)
+		if _, err := os.Stat(p); err == nil {
+			return &Built{Artifact: &a, Path: p}
+		}
 	}
 	return nil
 }
@@ -202,7 +205,7 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 	if pb, ok := e.Source.(Prebuilt); ok {
 		art, prebuilt, err = pb.FetchPrebuilt(ctx, ref, v.Revision, dir)
 	}
-	if !prebuilt && err == nil {
+	if !prebuilt && err == nil && v.Info != nil && v.Info.NeedsBuild {
 		if rart, hit := e.tryRemoteCache(ctx, b, ref, name, v, dir); hit {
 			art = rart
 			prebuilt = true
@@ -260,7 +263,7 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 }
 
 func (e *Engine) tryRemoteCache(ctx context.Context, b Builder, ref Ref, name string, v *Version, dir string) (*Artifact, bool) {
-	if e.RemoteCache == nil || v.Revision.Commit == "" {
+	if e.RemoteCache == nil || v.Revision.Commit == "" || v.Info == nil || !v.Info.NeedsBuild {
 		return nil, false
 	}
 	key := BuildCacheKey(b.Ecosystem(), ref.Owner, ref.Name, v.Revision.Commit, v.Version)
@@ -362,7 +365,7 @@ func (e *Engine) tryRemoteCache(ctx context.Context, b Builder, ref Ref, name st
 	sum1 := sha1.Sum(data)
 	computed1 := hex.EncodeToString(sum1[:])
 
-	fileName := strings.NewReplacer("@", "", "/", "-").Replace(name) + "-" + v.Version + ".tgz"
+	fileName := ArtifactFileName(b, name, v.Version)
 	destPath := filepath.Join(dir, fileName)
 	if err := writeFileAtomic(destPath, data); err != nil {
 		return nil, false

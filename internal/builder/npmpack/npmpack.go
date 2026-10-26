@@ -68,6 +68,11 @@ func FileName(name, version string) string {
 	return strings.NewReplacer("@", "", "/", "-").Replace(name) + "-" + version + ".tgz"
 }
 
+// FileName implements core.ArtifactNamer for Builder.
+func (Builder) FileName(name, version string) string {
+	return FileName(name, version)
+}
+
 // Build packs dir into req.OutDir with name/version forced to the request.
 func (Builder) Build(ctx context.Context, dir string, req core.BuildRequest) (*core.Artifact, error) {
 	_, m, err := read(dir)

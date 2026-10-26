@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
@@ -281,5 +282,47 @@ exit 255
 	_, _, _ = eOffline.m.Fetch(context.Background(), key, outOffline)
 	if eOffline.nCalls() != initialCalls {
 		t.Fatalf("offline remote was called %d times; want skipped", eOffline.nCalls())
+	}
+}
+
+func TestManagerFetchTimeoutFailOpen(t *testing.T) {
+	eTimeout := newEnv(t, `echo "$*" >> "$CALLS"
+sleep 1
+exit 0
+`)
+	eTimeout.m.CacheHeaderTimeout = 50 * time.Millisecond
+	eTimeout.m.CacheTransferTimeout = 200 * time.Millisecond
+	_ = eTimeout.m.Store.Add(eTimeout.remote, false)
+
+	key := "npm/o/x/1111111111222233333333333333333333333333/1.0.0"
+	outTimeout := filepath.Join(t.TempDir(), "timeout.tgz")
+	res, ok, err := eTimeout.m.Fetch(context.Background(), key, outTimeout)
+	if ok {
+		t.Fatal("expected ok: false on timeout")
+	}
+	if err != nil {
+		t.Fatalf("expected fail-open (err == nil), got %v", err)
+	}
+	if res.SHA512 != "" {
+		t.Fatalf("expected empty SHA512, got %q", res.SHA512)
+	}
+	if _, err := os.Stat(outTimeout); !os.IsNotExist(err) {
+		t.Fatalf("timeout should remove partial output file; err: %v", err)
+	}
+
+	// Remote should be marked down due to timeout
+	st := eTimeout.m.States()[eTimeout.remote.Key()]
+	if st.OK {
+		t.Fatal("expected remote state OK == false after timeout")
+	}
+
+	// Next call skips the timed out remote
+	callsBefore := eTimeout.nCalls()
+	_, ok2, _ := eTimeout.m.Fetch(context.Background(), key, outTimeout)
+	if ok2 {
+		t.Fatal("expected ok2 == false")
+	}
+	if eTimeout.nCalls() != callsBefore {
+		t.Fatalf("down remote should be skipped without invoking ssh, called %d times", eTimeout.nCalls()-callsBefore)
 	}
 }
