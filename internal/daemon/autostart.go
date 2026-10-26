@@ -123,8 +123,8 @@ func InstallAutostart(c Config) (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootout", c.launchdTarget())
-		err = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), path)
+		launchdBootout(c)
+		err = launchdBootstrap(c, path)
 	case "windows":
 		err = run("schtasks", "/Create", "/F", "/TN", c.serviceName(), "/XML", path)
 		if err == nil {
@@ -155,7 +155,7 @@ func RemoveAutostart(c Config) error {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootout", c.launchdTarget())
+		launchdBootout(c)
 	case "windows":
 		_ = run("schtasks", "/End", "/TN", c.serviceName())
 		_ = run("schtasks", "/Delete", "/F", "/TN", c.serviceName())
@@ -171,6 +171,35 @@ func RemoveAutostart(c Config) error {
 	return nil
 }
 
+// launchctl bootout returns before the service is gone, and a bootstrap that
+// races it fails ("Bootstrap failed: 5: Input/output error"), leaving the
+// service unloaded: the next kickstart then cannot find it. So bootout waits
+// until launchd has let go, and bootstrap retries until the label is loaded.
+func launchdBootout(c Config) {
+	_ = run("launchctl", "bootout", c.launchdTarget())
+	for i := 0; i < 50 && launchdLoaded(c); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func launchdLoaded(c Config) bool {
+	return exec.Command("launchctl", "print", c.launchdTarget()).Run() == nil
+}
+
+func launchdBootstrap(c Config, path string) error {
+	var err error
+	for i := 0; i < 30; i++ {
+		if launchdLoaded(c) {
+			return nil
+		}
+		if err = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), path); err == nil {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return err
+}
+
 func (c Config) launchdTarget() string {
 	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + c.launchdLabel()
 }
@@ -178,7 +207,9 @@ func (c Config) launchdTarget() string {
 func serviceStart(c Config) error {
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.servicePath())
+		if err := launchdBootstrap(c, c.servicePath()); err != nil {
+			return err
+		}
 		return run("launchctl", "kickstart", c.launchdTarget())
 	case "windows":
 		return run("schtasks", "/Run", "/TN", c.serviceName())
@@ -189,7 +220,8 @@ func serviceStart(c Config) error {
 func serviceStop(c Config) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return run("launchctl", "bootout", c.launchdTarget()) // KeepAlive would restart a plain kill
+		launchdBootout(c) // KeepAlive would restart a plain kill
+		return nil
 	case "windows":
 		stopDirect(c) // the daemon exits cleanly, so the supervisor ends too
 		_ = run("schtasks", "/End", "/TN", c.serviceName())

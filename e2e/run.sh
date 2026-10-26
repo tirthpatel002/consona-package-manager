@@ -252,7 +252,9 @@ PA=$(cd "$TMP/plain" && npmplain audit --json 2>/dev/null | vulns)
 check "plain npm audit in app = plain-npm audit without consona ($CA)" test -n "$CA" -a "$CA" = "$PA"
 
 echo "== crash: the service manager restarts the daemon"
-PID1=$(svc_pid); kill -9 "$PID1"
+PID1=$(svc_pid)
+# never `kill -9 0` (that is this whole process group) or an empty pid
+if [ "${PID1:-0}" -gt 1 ] 2>/dev/null; then kill -9 "$PID1"; else fail "service has no pid to kill (pid '${PID1:-}'): is it running?"; fi
 for _ in $(seq 50); do PID2=$(svc_pid); [ "$PID2" != 0 ] && [ "$PID2" != "$PID1" ] && curl -sf "http://127.0.0.1:$CONSONA_PORT/-/consona/ping" >/dev/null && break; sleep 0.1; done
 check "killed daemon (kill -9 pid $PID1) restarted by $SVCKIND as pid $PID2" bash -c "[ '$PID2' != 0 ] && [ '$PID2' != '$PID1' ] && svc_active"
 
