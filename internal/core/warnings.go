@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +20,8 @@ var warnings = struct {
 	mu     sync.Mutex
 	list   []reported
 	logged map[string]time.Time
-}{logged: map[string]time.Time{}}
+	msgs   map[string]string // key -> last message (see Touch)
+}{logged: map[string]time.Time{}, msgs: map[string]string{}}
 
 // Warn records a user-facing warning. ev.Message is the text shown to the
 // user; ev is logged at level warn (daemon log + log store) at most once
@@ -31,6 +33,7 @@ func Warn(key string, ev logstore.Entry) {
 	if len(warnings.list) > 200 {
 		warnings.list = warnings.list[len(warnings.list)-200:]
 	}
+	warnings.msgs[key] = ev.Message
 	t, seen := warnings.logged[key]
 	log := !seen || now.Sub(t) >= WarnLogEvery
 	if log {
@@ -57,3 +60,18 @@ func WarningsSince(t time.Time) []string {
 	}
 	return out
 }
+
+// Touch re-records the last warning reported under key, if any, for
+// WarningsSince (nothing is logged). Adapters call it for warnings found
+// by a source when the source was not asked again (memoised versions), so
+// every install summary still shows them.
+func Touch(key string) {
+	warnings.mu.Lock()
+	defer warnings.mu.Unlock()
+	if m, ok := warnings.msgs[key]; ok {
+		warnings.list = append(warnings.list, reported{time.Now(), m})
+	}
+}
+
+// RedirectKey is the warning key of a renamed/transferred source repo.
+func RedirectKey(owner, repo string) string { return "redirect|" + strings.ToLower(owner+"/"+repo) }

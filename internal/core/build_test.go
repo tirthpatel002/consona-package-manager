@@ -120,6 +120,12 @@ func TestWarnDedupesLogging(t *testing.T) {
 	if w := WarningsSince(time.Now()); len(w) != 0 {
 		t.Fatalf("nothing after now: %q", w)
 	}
+	t2 := time.Now()
+	Touch("k1")
+	Touch("never-warned")
+	if w := WarningsSince(t2); len(w) != 1 || w[0] != "renamed" {
+		t.Fatalf("Touch re-records the last warning for its key only: %q", w)
+	}
 	a.Flush(context.Background())
 	es, _ := st.Query(logstore.Filter{Event: logstore.EvSourceRedirect})
 	if len(es) != 2 || es[0].Level != "warn" {

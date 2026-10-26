@@ -391,7 +391,7 @@ func (s *Source) checkRedirect(ctx context.Context, owner, repo, path string, re
 			msg += fmt.Sprintf(" (@%s/%s)", strings.ToLower(o), strings.ToLower(n))
 		}
 	}
-	core.Warn("redirect|"+key, logstore.Entry{Event: logstore.EvSourceRedirect, Ecosystem: "github", Owner: owner, Repo: repo,
+	core.Warn(core.RedirectKey(owner, repo), logstore.Entry{Event: logstore.EvSourceRedirect, Ecosystem: "github", Owner: owner, Repo: repo,
 		Result: "redirected", HTTPStatus: resp.StatusCode, Message: msg, Fields: map[string]any{"requested": owner + "/" + repo, "current": cur}})
 }
 

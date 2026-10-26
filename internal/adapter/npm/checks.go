@@ -109,6 +109,7 @@ func manifestName(v *core.Version) string {
 // which is derived from the repo), and when v's git tag was moved after
 // this daemon built it (lockfiles then fail with EINTEGRITY).
 func (h *handler) checkName(ref core.Ref, name string, v *core.Version) {
+	core.Touch(core.RedirectKey(ref.Owner, ref.Name)) // memoised versions: the source was not asked again
 	if v == nil {
 		return
 	}
