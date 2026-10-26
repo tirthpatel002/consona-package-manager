@@ -49,6 +49,21 @@ npm install @your-github-name/your-repo
 - `consona install` is `npm install` that also prefetches private packages
   in parallel; it is a little faster but optional.
 
+## Local folders and other devices (SSH)
+
+```sh
+consona init --username tirth       # once per device: a free local name, scope @tirth
+consona register ~/code/my-lib      # serve the folder live as @tirth/my-lib
+consona remote add devbox devbox    # packages registered on a machine you can ssh into
+npm install @tirth/my-lib           # this device's folders > ssh remotes > GitHub
+```
+
+Every install says where each package came from (`<- local ...`,
+`<- ssh devbox ...`, `<- github ...`). Folders are versioned by content
+hash (`1.0.0-local.3.h2cab0880`) and rebuilt only when they change. Hosts
+in `~/.ssh/config` are found automatically. Details, versioning, caching,
+timings and limits: [docs/local-and-ssh.md](docs/local-and-ssh.md).
+
 ## Undo
 
 ```sh
@@ -104,6 +119,12 @@ Your GitHub token stays in `gh`; consona only holds it in memory.
 |---|---|
 | `internal/core` | interfaces `Source`, `Builder`, `Adapter`; adapter registry; version rules; `Engine` (resolve + build + commit-keyed cache) |
 | `internal/source/github` | `Source`: GitHub API via the gh login |
+| `internal/identity` | `consona init`: username + device id |
+| `internal/localindex` | registered folders of this device |
+| `internal/source/local` | `Source`: registered folders, content-hash versions |
+| `internal/source/sshremote` | `Source`: other devices over ssh (`remote-serve` protocol, ssh-config discovery, list cache) |
+| `internal/source/chain` | resolution order local > ssh > GitHub, resolution events |
+| `internal/localcli` | CLI for init/register/remote/which |
 | `internal/builder/npmpack` | `Builder`: npm tarball via `npm pack` |
 | `internal/adapter/npm` | `Adapter`: npmrc setup, npm registry protocol, login lookup, `npm` wrapper |
 | `internal/daemon` | loopback server mounting each adapter at `/<name>/`, auto-start |
@@ -124,4 +145,6 @@ scripts/release.sh 1.0.0   # dist/: binaries for linux/darwin amd64+arm64,
                            # windows amd64, SHA256SUMS, install.sh
 ```
 
-Env: `CONSONA_PORT` (default 48731), `CONSONA_HOME` (default `~/.cache/consona`).
+Env: `CONSONA_PORT` (default 48731), `CONSONA_HOME` (default `~/.cache/consona`), `CONSONA_CONFIG_DIR`
+(identity, registered folders, remotes). SSH options: see
+[docs/local-and-ssh.md](docs/local-and-ssh.md#environment).

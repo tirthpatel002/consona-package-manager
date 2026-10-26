@@ -79,7 +79,7 @@ func (h *handler) bulkAudit(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "bad audit body")
 		return
 	}
-	withheld := FilterBulk(payload, RoutedScopes())
+	withheld := FilterBulk(payload, privateScopes())
 	log.Printf("audit: forwarding %d public package names, withheld %d private", len(payload), withheld)
 	if len(payload) == 0 {
 		w.Header().Set("Content-Type", "application/json")
@@ -95,7 +95,7 @@ func (h *handler) quickAudit(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "bad audit body")
 		return
 	}
-	log.Printf("audit (quick): withheld %d private", FilterQuick(tree, RoutedScopes()))
+	log.Printf("audit (quick): withheld %d private", FilterQuick(tree, privateScopes()))
 	h.forward(w, r, quickPath, tree)
 }
 

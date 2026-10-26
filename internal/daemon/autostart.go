@@ -54,6 +54,9 @@ func AutostartInstalled(c Config) bool {
 // (used for builds). Never credentials: the gh token is read at runtime.
 func (c Config) serviceEnv() [][2]string {
 	env := [][2]string{{"CONSONA_HOME", c.Home}, {"CONSONA_PORT", strconv.Itoa(c.Port)}, {"PATH", os.Getenv("PATH")}}
+	if d := os.Getenv("CONSONA_CONFIG_DIR"); d != "" { // identity, registered folders, remotes
+		env = append(env, [2]string{"CONSONA_CONFIG_DIR", d})
+	}
 	for _, k := range []string{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"} {
 		if v := os.Getenv(k); v != "" {
 			if abs, err := filepath.Abs(v); err == nil {

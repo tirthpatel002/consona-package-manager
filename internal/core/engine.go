@@ -83,7 +83,7 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 	e.mu.Lock()
 	m, ok := e.memo[key]
 	e.mu.Unlock()
-	if ok && time.Since(m.at) < e.TTL {
+	if ok && time.Since(m.at) < e.TTL && !e.live(ref) {
 		return m.pkgs, nil
 	}
 	revs, err := e.Source.Revisions(ctx, ref)
@@ -103,6 +103,17 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 		if bs, err := os.ReadFile(f); err == nil && json.Unmarshal(bs, &inf) == nil {
 			infos[i] = &inf
 			return nil
+		}
+		if pb, ok := e.Source.(Prebuilt); ok {
+			got, ok, err := pb.PrebuiltInfo(ctx, ref, revs[i])
+			if err != nil {
+				return fmt.Errorf("%s@%s: %w", name, revs[i].Version, err)
+			}
+			if ok {
+				infos[i] = got
+				bs, _ := json.Marshal(got)
+				return writeFileAtomic(f, bs)
+			}
 		}
 		return e.withSource(ctx, ref, revs[i].Commit, func(dir string) error {
 			got, err := b.Inspect(dir)
@@ -171,11 +182,18 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 		return nil, err
 	}
 	var art *Artifact
-	err := e.withSource(ctx, ref, v.Revision.Commit, func(src string) error {
-		var err error
-		art, err = b.Build(ctx, src, BuildRequest{Name: name, Version: v.Version, Revision: v.Revision, OutDir: dir})
-		return err
-	})
+	prebuilt := false
+	var err error
+	if pb, ok := e.Source.(Prebuilt); ok {
+		art, prebuilt, err = pb.FetchPrebuilt(ctx, ref, v.Revision, dir)
+	}
+	if !prebuilt && err == nil {
+		err = e.withSource(ctx, ref, v.Revision.Commit, func(src string) error {
+			var err error
+			art, err = b.Build(ctx, src, BuildRequest{Name: name, Version: v.Version, Revision: v.Revision, OutDir: dir})
+			return err
+		})
+	}
 	if err != nil {
 		what := fmt.Sprintf("for %s@%s (commit %.7s)", name, v.Version, v.Revision.Commit)
 		var be *BuildError

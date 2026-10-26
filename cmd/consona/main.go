@@ -12,6 +12,7 @@ import (
 
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
 	"github.com/tirthpatel002/consona-package-manager/internal/daemon"
+	"github.com/tirthpatel002/consona-package-manager/internal/localcli"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 
 	_ "github.com/tirthpatel002/consona-package-manager/internal/adapter/npm" // adapters register themselves
@@ -46,8 +47,12 @@ func fail(format string, a ...any) int {
 
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, usage+localcli.Usage)
 		return 2
+	}
+	localcli.Version = version
+	if code, ok := localcli.Run(args); ok { // init, register, remote, ...
+		return code
 	}
 	cfg := daemon.Load()
 	ctx := context.Background()
@@ -84,15 +89,17 @@ func run(args []string) int {
 				return fail("unknown setup argument %q", args[i])
 			}
 		}
-		src, err := github.New()
-		if err != nil {
+		var owners []string
+		if src, err := github.New(); err == nil {
+			if owners, err = src.Owners(ctx); err != nil {
+				return fail("%v", err)
+			}
+		} else if len(localcli.ExtraOwners()) == 0 { // nothing to serve without GitHub
 			return fail("%v", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "consona: GitHub not available (%v): serving this device's folders and ssh remotes only\n", err)
 		}
-		owners, err := src.Owners(ctx)
-		if err != nil {
-			return fail("%v", err)
-		}
-		owners = append(owners, extra...)
+		owners = append(append(owners, extra...), localcli.ExtraOwners()...)
 		path, err := npm.Setup(ctx, npmBase, owners)
 		if err != nil {
 			return fail("%v", err)
@@ -112,7 +119,7 @@ func run(args []string) int {
 			return fail("%v", err)
 		}
 		fmt.Println("consona: " + auto)
-		fmt.Printf("consona: npm now asks %s first (%s): @%s served from GitHub, everything else goes to your previous registry\n",
+		fmt.Printf("consona: npm now asks %s first (%s): @%s served by consona (this device's folders, ssh remotes, GitHub), everything else goes to your previous registry\n",
 			npmBase, path, strings.ToLower(strings.Join(owners, ", @")))
 		return 0
 	case "install", "i", "audit":
@@ -128,6 +135,9 @@ func run(args []string) int {
 			cmdName = "audit"
 		}
 		code := npm.Exec(ctx, npmBase, append([]string{cmdName}, args[1:]...))
+		if code == 0 && cmdName == "install" {
+			localcli.AfterInstall(ctx, cfg, npm, npmBase, append([]string{cmdName}, args[1:]...), start)
+		}
 		if code != 0 {
 			for _, m := range daemon.ErrorsSince(cfg, start) {
 				fmt.Fprintln(os.Stderr, "consona:", m)
@@ -141,11 +151,7 @@ func run(args []string) int {
 		}
 		switch sub {
 		case "run":
-			src, err := github.New()
-			if err != nil {
-				log.Print(err)
-				return 1
-			}
+			src := localcli.NewDaemonSource(cfg.Home) // local folders, ssh remotes, GitHub
 			if err := daemon.Serve(cfg, src); err != nil {
 				log.Print(err)
 				return 1
@@ -169,9 +175,9 @@ func run(args []string) int {
 		fmt.Println("consona " + version)
 		return 0
 	case "help", "-h", "--help":
-		fmt.Print(usage)
+		fmt.Print(usage + localcli.Usage)
 		return 0
 	}
-	fmt.Fprint(os.Stderr, usage)
+	fmt.Fprint(os.Stderr, usage+localcli.Usage)
 	return 2
 }

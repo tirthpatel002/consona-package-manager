@@ -19,13 +19,14 @@ secs() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", b-a}'; }
 
 SVC=consona; [ "$CONSONA_PORT" = 48731 ] || SVC=consona-$CONSONA_PORT
 UNIT=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SVC.service
-PORT2=48732 FPORT=48799 FAKE=; KEEP=
+# Ports are overridable so several runs (or a developer daemon) can coexist.
+PORT2=${E2E_PORT2:-48732} FPORT=${E2E_FPORT:-48799} FRESH_PORT=${E2E_FRESH_PORT:-48731} FAKE=; KEEP=
 in2() { CONSONA_PORT=$PORT2 CONSONA_HOME=$TMP/h2 npm_config_userconfig=$TMP/authrc "$@"; }   # 2nd instance, token-requiring upstream
 cleanup() {   # never leave a service, daemon or fake registry behind
   [ -x "$BIN" ] && { "$BIN" setup --undo >/dev/null 2>&1; in2 "$BIN" daemon stop >/dev/null 2>&1; }
   [ -n "$FAKE" ] && kill "$FAKE" 2>/dev/null
   [ -n "${HTTP:-}" ] && kill "$HTTP" "${HTTP2:-}" 2>/dev/null
-  [ -x "$BIN" ] && env -i HOME="$TMP/fresh-home" PATH="$PATH" "$BIN" daemon stop >/dev/null 2>&1
+  [ -x "$BIN" ] && env -i HOME="$TMP/fresh-home" PATH="$PATH" CONSONA_PORT="$FRESH_PORT" "$BIN" daemon stop >/dev/null 2>&1
   if [ -z "$KEEP" ]; then rm -rf "$TMP"; fi
 }
 trap cleanup EXIT
@@ -288,10 +289,10 @@ RC_BEFORE=$(sha256sum "$HOME/.npmrc" 2>/dev/null)
 TOKEN_FILE=$(mktemp); chmod 600 "$TOKEN_FILE"
 TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token)
 printf '%s\n' "$TOK" > "$TOKEN_FILE"
-fresh() { env -i HOME="$FH" PATH="$PATH" USER="$USER" LANG=C.UTF-8 GH_TOKEN="$TOK" "$@"; }
+fresh() { env -i HOME="$FH" PATH="$PATH" USER="$USER" LANG=C.UTF-8 GH_TOKEN="$TOK" CONSONA_PORT="$FRESH_PORT" "$@"; }
 cp "$TMP/app/package.json" "$FH/pkg.json"; mkdir -p "$FH/app/src"; cp "$TMP/app/package.json" "$FH/app/"; cp "$TMP/app/src/App.tsx" "$FH/app/src/"
 (cd "$FH" && fresh "$BIN" setup --no-autostart > "$TMP/fresh-setup.out" 2>&1); rc=$?
-check "fresh: consona setup (no prior npmrc) rc=$rc" bash -c "[ $rc -eq 0 ] && [ \"\$(cd '$FH' && env -i HOME='$FH' PATH='$PATH' npm config get registry)\" = http://127.0.0.1:48731/npm/ ]"
+check "fresh: consona setup (no prior npmrc) rc=$rc" bash -c "[ $rc -eq 0 ] && [ \"\$(cd '$FH' && env -i HOME='$FH' PATH='$PATH' npm config get registry)\" = http://127.0.0.1:$FRESH_PORT/npm/ ]"
 (cd "$FH/app" && fresh "$BIN" install > "$TMP/fresh-install.out" 2>&1); rc=$?
 check "fresh: consona install of the e2e app (empty npm cache) rc=$rc" bash -c "[ $rc -eq 0 ] && ls -d '$FH'/app/node_modules/@$OWNER/consona-e2e-lib-{a,b,c,ts} >/dev/null"
 rm -rf "$FH/app/node_modules" "$FH/app/package-lock.json"
@@ -301,14 +302,14 @@ FA=$(cd "$FH/app" && fresh npm audit --json 2>/dev/null | vulns)
 check "fresh: npm audit = plain-npm audit ($FA)" test -n "$FA" -a "$FA" = "$PA"
 (cd "$FH" && fresh "$BIN" setup --undo > "$TMP/fresh-undo.out" 2>&1); rc=$?
 check "fresh: undo rc=$rc; npmrc removed (it did not exist before), daemon stopped" \
-  bash -c "[ $rc -eq 0 ] && [ ! -e '$FH/.npmrc' ] && ! curl -s http://127.0.0.1:48731/-/consona/ping >/dev/null"
+  bash -c "[ $rc -eq 0 ] && [ ! -e '$FH/.npmrc' ] && ! curl -s http://127.0.0.1:$FRESH_PORT/-/consona/ping >/dev/null"
 unset TOK
 LEAKS=$(grep -rlFf "$TOKEN_FILE" "$FH" "$TMP"/*.out 2>/dev/null | wc -l); rm -f "$TOKEN_FILE"
 check "fresh: gh token in no written file under the fresh HOME" test "$LEAKS" -eq 0
 check "fresh: real ~/.npmrc untouched" test "$(sha256sum "$HOME/.npmrc" 2>/dev/null)" = "$RC_BEFORE"
 
 echo "== release build + install.sh via a local http server"
-VER=0.9.0-e2e DIST=$TMP/dist HPORT=48790
+VER=0.9.0-e2e DIST=$TMP/dist HPORT=${E2E_HPORT:-48790}
 (cd "$ROOT" && bash scripts/release.sh "$VER" "$DIST" > "$TMP/release.out" 2>&1); rc=$?
 check "release: 5 static binaries + SHA256SUMS (rc=$rc)" bash -c "[ $rc -eq 0 ] && [ \$(grep -c ' consona_${VER}_' '$DIST/SHA256SUMS') -eq 5 ] && (cd '$DIST' && sha256sum -c --quiet SHA256SUMS) && file '$DIST/consona_${VER}_linux_amd64' | grep -q 'statically linked'"
 (cd "$DIST" && exec python3 -m http.server $HPORT --bind 127.0.0.1 > "$TMP/http.log" 2>&1) & HTTP=$!
