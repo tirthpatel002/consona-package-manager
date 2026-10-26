@@ -34,6 +34,7 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
   consona token add|list|test|remove   optional named GitHub tokens (see "consona token help")
   consona logs [filters] | export | prune | clear | info
                                        structured event log (see "consona logs help")
+  consona why <@scope/pkg> | report    provenance of installed packages (see "consona why help")
   consona version                      print the version
 
 Every command prints what it is doing on stderr (npm config lines, credential used, daemon
@@ -180,6 +181,8 @@ func run(args []string) int {
 		return newTokenCmd().run(ctx, args[1:])
 	case "logs", "log":
 		return runLogs(cfg, args[1:])
+	case "why", "report":
+		return runWhy(cfg, args)
 	case "install", "i", "audit":
 		if err := npm.CheckSetup(npmBase); err != nil {
 			return fail("%v", err)
