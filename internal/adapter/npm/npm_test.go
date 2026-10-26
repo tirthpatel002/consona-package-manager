@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 )
 
@@ -42,15 +45,31 @@ func (f *fakeSource) Fetch(_ context.Context, _ core.Ref, _, dir string) error {
 // fakeBuilder writes a fixed tarball so the test needs no npm.
 // With needsBuild it behaves like a package with a prepare script, and
 // fail makes its build step fail.
-type fakeBuilder struct{ needsBuild, fail bool }
+type fakeBuilder struct {
+	needsBuild, fail bool
+	delay            time.Duration
+}
+
+// fakeGHToken is token-shaped (not a real token): build output holding it
+// must be redacted.
+var fakeGHToken = "ghp_" + strings.Repeat("Z", 36)
 
 func (fakeBuilder) Ecosystem() string { return "npm" }
 func (f fakeBuilder) Inspect(string) (*core.Info, error) {
 	return &core.Info{Version: "1.0.0", Manifest: []byte(`{"name":"@o/lib","dependencies":{"@o/other":"^1"}}`), NeedsBuild: f.needsBuild}, nil
 }
 func (f fakeBuilder) Build(_ context.Context, _ string, r core.BuildRequest) (*core.Artifact, error) {
+	time.Sleep(f.delay)
 	if f.fail {
-		return nil, &core.BuildError{Step: "npm install", Output: []byte("tsc: error TS2322")}
+		var out strings.Builder
+		for i := 1; i <= 24; i++ {
+			fmt.Fprintf(&out, "line %d of the output\n", i)
+			if i == 10 {
+				out.WriteString("echo " + fakeGHToken + " " + os.Getenv("CONSONA_TOKEN_SOMEONE") + "\n")
+			}
+		}
+		out.WriteString("tsc: error TS2322 " + fakeGHToken + "\n")
+		return nil, &core.BuildError{Step: "npm install", Script: `"prepare" script`, Output: []byte(out.String())}
 	}
 	data := []byte("tarball-bytes")
 	file := npmpack.FileName(r.Name, r.Version)
@@ -289,22 +308,28 @@ func TestSurvivesNpmRewrite(t *testing.T) {
 	}
 }
 
-// Packages with a build step are listed without hashes and built when
-// their tarball is requested; a failed build is one clear 422 naming the
-// package and version, with the output saved to a log file.
+// A package with a build step: the packument waits for the latest
+// version's build and carries its hashes (so the first lockfile has
+// integrity); a failed build is one clear 422 naming the package, version
+// and failing script, with the output's last lines (credentials removed)
+// and the log file.
 func TestLazyBuildAndBuildFailure(t *testing.T) {
 	srv, _ := newServer(t, fakeBuilder{needsBuild: true})
 	doc := getJSON(t, srv.URL+"/@o%2flib")
 	dist := doc["versions"].(map[string]any)["1.0.0"].(map[string]any)["dist"].(map[string]any)
-	if dist["integrity"] != nil {
-		t.Fatalf("unbuilt version must not claim an integrity: %v", dist)
-	}
 	resp, err := http.Get(dist["tarball"].(string))
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("lazy tarball: %v %v", err, resp.Status)
 	}
+	data, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	s1, s512 := npmpack.Hashes(data)
+	if dist["shasum"] != s1 || dist["integrity"] != "sha512-"+s512 {
+		t.Fatalf("packument of a needs-build version must carry the built tarball's hashes: %v", dist)
+	}
 
+	const envTok = "s3cr3t-value-from-env-123"
+	t.Setenv("CONSONA_TOKEN_SOMEONE", envTok)
 	srv, _ = newServer(t, fakeBuilder{needsBuild: true, fail: true})
 	resp, _ = http.Get(srv.URL + "/@o/lib/-/o-lib-1.0.0.tgz")
 	var body map[string]string
@@ -314,9 +339,65 @@ func TestLazyBuildAndBuildFailure(t *testing.T) {
 	if resp.StatusCode != 422 || !strings.Contains(msg, "build failed for @o/lib@1.0.0") || !strings.Contains(msg, "build-failed.log") {
 		t.Fatalf("%d %q", resp.StatusCode, msg)
 	}
+	for _, want := range []string{`the package's "prepare" script failed (during npm install)`, "tsc: error TS2322", "line 24 of the output"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "line 4 of the output") {
+		t.Fatalf("error must hold only the last lines:\n%s", msg)
+	}
+	for _, leak := range []string{fakeGHToken, envTok} {
+		if strings.Contains(msg, leak) {
+			t.Fatalf("credential in the error:\n%s", msg)
+		}
+	}
 	logf := msg[strings.LastIndex(msg, " ")+1:]
-	if b, _ := os.ReadFile(logf); !strings.Contains(string(b), "TS2322") {
+	b, _ := os.ReadFile(logf)
+	if !strings.Contains(string(b), "TS2322") || !strings.Contains(string(b), "line 1 of the output") {
 		t.Fatalf("build output not saved in %s", logf)
+	}
+	if strings.Contains(string(b), fakeGHToken) || strings.Contains(string(b), envTok) {
+		t.Fatal("credential in the saved build log")
+	}
+}
+
+// When the build takes longer than the build wait, the packument is
+// served at once without that version's hashes, with a warning logged.
+func TestPackumentBuildWaitTimeout(t *testing.T) {
+	logs := captureLogs(t)
+	srv, _ := newServer(t, fakeBuilder{needsBuild: true, delay: 2 * time.Second})
+	h := srv.Config.Handler.(*handler)
+	h.buildWait = 50 * time.Millisecond
+	t0 := time.Now()
+	doc := getJSON(t, srv.URL+"/@o%2flib")
+	if d := time.Since(t0); d > time.Second {
+		t.Fatalf("packument waited %s, want about the build wait", d)
+	}
+	dist := doc["versions"].(map[string]any)["1.0.0"].(map[string]any)["dist"].(map[string]any)
+	if dist["integrity"] != nil {
+		t.Fatalf("a version still building must not claim an integrity: %v", dist)
+	}
+	var found bool
+	for _, e := range logs(logstore.EvInstallResolve) {
+		if e.Level == "warn" && e.Result == "build-wait-timeout" && strings.Contains(e.Message, "CONSONA_BUILD_WAIT") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no warning logged for the build-wait timeout")
+	}
+	t.Setenv("CONSONA_BUILD_WAIT", "0")
+	if BuildWait() >= 0 {
+		t.Fatal("CONSONA_BUILD_WAIT=0 must disable the wait")
+	}
+	t.Setenv("CONSONA_BUILD_WAIT", "5s")
+	if BuildWait() != 5*time.Second {
+		t.Fatal("CONSONA_BUILD_WAIT=5s")
+	}
+	t.Setenv("CONSONA_BUILD_WAIT", "")
+	if BuildWait() != DefaultBuildWait {
+		t.Fatal("default build wait")
 	}
 }
 

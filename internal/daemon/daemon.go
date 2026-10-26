@@ -111,6 +111,10 @@ func Serve(c Config, src core.Source) error {
 		ns, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		_ = json.NewEncoder(w).Encode(e.ErrorsSince(time.Unix(0, ns)))
 	})
+	mux.HandleFunc("/-/consona/warnings", func(w http.ResponseWriter, r *http.Request) {
+		ns, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		_ = json.NewEncoder(w).Encode(core.WarningsSince(time.Unix(0, ns)))
+	})
 	mux.HandleFunc("/-/consona/stop", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -279,8 +283,14 @@ func Ensure(c Config) error {
 }
 
 // ErrorsSince fetches errors the daemon reported after t.
-func ErrorsSince(c Config, t time.Time) []string {
-	resp, err := client.Get(fmt.Sprintf("%s/-/consona/errors?since=%d", c.BaseURL(), t.UnixNano()))
+func ErrorsSince(c Config, t time.Time) []string { return since(c, "errors", t) }
+
+// WarningsSince fetches warnings the daemon recorded after t (a renamed
+// repo, a package.json name that differs from the package, a moved tag).
+func WarningsSince(c Config, t time.Time) []string { return since(c, "warnings", t) }
+
+func since(c Config, what string, t time.Time) []string {
+	resp, err := client.Get(fmt.Sprintf("%s/-/consona/%s?since=%d", c.BaseURL(), what, t.UnixNano()))
 	if err != nil {
 		return nil
 	}

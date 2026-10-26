@@ -48,6 +48,15 @@ npm install @your-github-name/your-repo
   served from its default branch as `0.0.0-<commit>`.
 - Packages that need building (TypeScript etc.) are built on your machine
   with their own `prepare`/`prepack` script, once per commit, then cached.
+  npm's first request for such a package waits for the latest version's
+  build (up to `CONSONA_BUILD_WAIT`, default 90s) so the lockfile gets its
+  `integrity`. A failed build names the failing script and shows the last
+  20 lines of its output (credentials removed); the full output is in the
+  log file named in the error.
+- `consona install` ends with a `consona: warning:` line when a repo was
+  renamed or transferred (GitHub redirects the old name), when a
+  package.json names a different package than the repo, or when a tag was
+  moved after a lockfile recorded its old integrity.
 - `consona install` is `npm install` that also prefetches private packages
   in parallel; it is a little faster but optional.
 
@@ -170,6 +179,7 @@ consona logs --errors --since 2h
 consona logs --package @acme/lib --limit 20
 consona logs --event credential --json      # credential.resolve / credential.fail
 consona logs --event source                 # source.resolve (local|ssh|github) / source.fail
+                                            # source.redirect / source.name_mismatch / source.tag_moved (warn)
 consona logs --event ssh.probe --errors     # remotes that could not be reached
 consona logs export --format jsonl -o consona-logs.jsonl
 consona logs info                           # backend, path, counts, retention
@@ -364,4 +374,7 @@ Env:
 - `CONSONA_TOKEN`, `CONSONA_TOKEN_<OWNER>`, `GH_TOKEN`, `GITHUB_TOKEN`,
   `GH_CONFIG_DIR`: credentials (see [GitHub credentials](#github-credentials)).
 - `CONSONA_LOG_BACKEND`, `CONSONA_LOG_MAX_AGE`, `CONSONA_LOG_MAX_SIZE_MB`: log store.
+- `CONSONA_BUILD_WAIT`: how long npm's first request for a package with a
+  build step waits for its latest version's build, so the packument carries
+  `dist.integrity` (Go duration, default `90s`; `0` never waits).
 - SSH options: see [docs/local-and-ssh.md](docs/local-and-ssh.md#environment).

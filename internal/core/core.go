@@ -91,10 +91,16 @@ type Builder interface {
 // BuildError is a failure of the package's own build step.
 type BuildError struct {
 	Step   string // e.g. "npm install", "npm run prepack"
+	Script string // the lifecycle script that failed, e.g. `"prepare" script`; "" if unknown
 	Output []byte // combined output of the failing step
 }
 
-func (e *BuildError) Error() string { return e.Step + " failed" }
+func (e *BuildError) Error() string {
+	if e.Script != "" {
+		return e.Step + " failed: " + e.Script
+	}
+	return e.Step + " failed"
+}
 
 // Adapter integrates one package tool (npm, pnpm, pip, ...): it configures
 // the tool once, serves the tool's registry protocol, and wraps its command.

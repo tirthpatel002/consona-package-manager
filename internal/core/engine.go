@@ -7,15 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
+	"github.com/tirthpatel002/consona-package-manager/internal/redact"
 )
 
 // ErrBuild marks a failed package build; the message names the package,
 // version and the log with the build output.
 var ErrBuild = errors.New("build failed")
+
+// BuildTailLines is how many trailing lines of a failed build's output
+// are put into the error npm shows (the full output is in the log file).
+var BuildTailLines = 20
 
 // BuildTimeout bounds one package build (install + build scripts + pack).
 var BuildTimeout = 10 * time.Minute
@@ -219,9 +225,15 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 		what := fmt.Sprintf("for %s@%s (commit %.7s)", name, v.Version, v.Revision.Commit)
 		var be *BuildError
 		if errors.As(err, &be) {
+			out := SanitizeOutput(be.Output)
 			logf := filepath.Join(dir, "build-failed.log")
-			_ = os.WriteFile(logf, be.Output, 0o600)
-			return nil, fmt.Errorf("%w %s: %s failed; full output: %s", ErrBuild, what, be.Step, logf)
+			_ = os.WriteFile(logf, out, 0o600)
+			failed := be.Step + " failed"
+			if be.Script != "" {
+				failed = fmt.Sprintf("the package's %s failed (during %s)", be.Script, be.Step)
+			}
+			return nil, fmt.Errorf("%w %s: %s; last lines of the build output:\n%s\nfull output: %s",
+				ErrBuild, what, failed, tailLines(out, BuildTailLines), logf)
 		}
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrAccess) {
 			return nil, err
@@ -316,6 +328,75 @@ func (e *Engine) ErrorsSince(t time.Time) []string {
 		if r.at.After(t) && !seen[r.msg] {
 			seen[r.msg] = true
 			out = append(out, r.msg)
+		}
+	}
+	return out
+}
+
+// SanitizeOutput removes credentials from build output before it is shown
+// or saved: token-shaped values, every credential consona has used
+// (redact.AddSecret) and the values of the build environment's
+// token/secret variables (a script may echo its environment).
+func SanitizeOutput(b []byte) []byte {
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		u := strings.ToUpper(k)
+		for _, w := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "_AUTH", "APIKEY", "API_KEY", "CREDENTIAL"} {
+			if strings.Contains(u, w) {
+				redact.AddSecret(v)
+				break
+			}
+		}
+	}
+	return []byte(redact.String(string(b)))
+}
+
+// tailLines returns the last n non-empty lines of out, each indented with
+// "  | " and cut at 300 bytes.
+func tailLines(out []byte, n int) string {
+	var lines []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n") {
+		if l = strings.TrimRight(l, " \t\r"); strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	for i, l := range lines {
+		if len(l) > 300 {
+			l = l[:300] + "…"
+		}
+		lines[i] = "  | " + l
+	}
+	if len(lines) == 0 {
+		return "  | (no output)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+// MovedFrom returns the commits other than v's for which this engine
+// built v's version of ref before: a git tag that was moved (or deleted
+// and re-created) after a lockfile recorded the old build's integrity.
+// Only tagged versions of non-live sources are checked.
+func (e *Engine) MovedFrom(b Builder, ref Ref, v *Version) []string {
+	if v == nil || v.Revision.Tag == "" || v.Revision.Head || e.live(ref) {
+		return nil
+	}
+	ents, err := os.ReadDir(e.base(b, ref))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, d := range ents {
+		if !d.IsDir() || d.Name() == v.Revision.Commit {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(e.base(b, ref), d.Name(), v.Version, "artifact.json")); err == nil {
+			out = append(out, d.Name())
 		}
 	}
 	return out

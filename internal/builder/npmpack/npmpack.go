@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
@@ -135,7 +137,37 @@ func npm(ctx context.Context, dir string, scripts bool, args ...string) error {
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(&out, "\n[consona] npm %s in %s: %v\n", strings.Join(args, " "), dir, err)
-		return &core.BuildError{Step: "npm " + strings.Join(args[:min(2, len(args))], " "), Output: out.Bytes()}
+		return &core.BuildError{Step: "npm " + strings.Join(args[:min(2, len(args))], " "), Script: failedScript(args, out.Bytes(), dir), Output: out.Bytes()}
 	}
 	return nil
+}
+
+// npm prints "> name@version <event>" before it runs a lifecycle script
+// of the package itself, and "npm error path <dir>" for the package
+// whose script failed.
+var (
+	scriptBanner = regexp.MustCompile(`(?m)^> \S+@\S+ ([a-z][a-z0-9:_-]*)\s*$`)
+	errorPath    = regexp.MustCompile(`(?m)^npm (?:error|ERR!) path (.+?)\s*$`)
+)
+
+// failedScript names the lifecycle script that failed in an npm step, as
+// shown to the user: `"prepare" script`, `"prepack" script`, or an install
+// script of a dependency. "" when the failure was not a script.
+func failedScript(args []string, out []byte, dir string) string {
+	if len(args) >= 2 && args[0] == "run" {
+		return strconv.Quote(args[1]) + " script"
+	}
+	if len(args) == 0 || args[0] != "install" {
+		return ""
+	}
+	if m := errorPath.FindAllSubmatch(out, -1); len(m) > 0 {
+		p := filepath.Clean(string(m[len(m)-1][1]))
+		if rel, err := filepath.Rel(dir, p); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			return "install script of dependency " + filepath.ToSlash(rel)
+		}
+	}
+	if m := scriptBanner.FindAllSubmatch(out, -1); len(m) > 0 {
+		return strconv.Quote(string(m[len(m)-1][1])) + " script"
+	}
+	return ""
 }
