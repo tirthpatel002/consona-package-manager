@@ -14,7 +14,19 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OWNER=${OWNER:-rakesh-jain-cb1998}
 T=${E2E_DIR:-/tmp/consona-pnpm-e2e}
+chmod -R u+w "$T" 2>/dev/null || true
 rm -rf "$T"; mkdir -p "$T"
+
+# 1. Build consona before changing HOME so Go uses the existing module cache
+GOCACHE=$(go env GOCACHE)
+GOMODCACHE=$(go env GOMODCACHE)
+GOPATH=$(go env GOPATH)
+export GOCACHE GOMODCACHE GOPATH
+
+BIN=$T/bin/consona
+mkdir -p "$T/bin"
+echo "== build consona"
+(cd "$ROOT" && go build -o "$BIN" ./cmd/consona) || { echo "build failed"; exit 1; }
 
 OWNER_ENV=CONSONA_TOKEN_$(printf '%s' "$OWNER" | tr 'a-z-' 'A-Z_')
 unset GH_TOKEN GITHUB_TOKEN CONSONA_TOKEN    # never a machine-wide token
@@ -43,7 +55,6 @@ export npm_config_audit=false
 mkdir -p "$HOME" "$CONSONA_HOME" "$CONSONA_CONFIG_DIR"
 : > "$CONSONA_SSH_CONFIG"
 
-BIN=$T/bin/consona
 FAILS=0
 PASSES=0
 
@@ -56,12 +67,10 @@ show() { sed 's/^/      | /' "$1"; }
 cleanup() {
   "$BIN" setup --undo >/dev/null 2>&1 || true
   "$BIN" daemon stop >/dev/null 2>&1 || true
+  chmod -R u+w "$T" 2>/dev/null || true
   rm -rf "$T"
 }
 trap cleanup EXIT
-
-echo "== build consona"
-(cd "$ROOT" && go build -o "$BIN" ./cmd/consona) || { echo "build failed"; exit 1; }
 
 echo "== install pnpm into temp prefix"
 PNPM_DIR=$T/pnpm
@@ -114,14 +123,37 @@ echo "== (1) fresh install with consona install --pm pnpm"
 show "$T/inst1.out"
 check "consona install --pm pnpm rc=$rc" test $rc -eq 0
 check "pm message says using pnpm (--pm flag)" grep -q 'consona: using pnpm (--pm flag)' "$T/inst1.out"
+check "pnpm install output has consona source summary lines" grep -q '^consona: source:' "$T/inst1.out"
 check "sources printed: lib-a, lib-b, lib-ts from github, local-pkg from local" bash -c "grep -q 'source:.*consona-e2e-lib-a' '$T/inst1.out' && grep -q 'source:.*consona-e2e-lib-b' '$T/inst1.out' && grep -q 'source:.*consona-e2e-lib-ts' '$T/inst1.out' && grep -q 'source:.*local-pkg' '$T/inst1.out'"
+
+echo "== check daemon log has registry.redirect for public scoped package (@types/node)"
+"$BIN" logs --event registry.redirect --json > "$T/log-redirect.json" 2>&1
+show "$T/log-redirect.json"
+check "daemon log has registry.redirect event for public scoped package (@types/node)" bash -c "grep -q '\"event\":\"registry.redirect\"' '$T/log-redirect.json' && grep -qE '@types/node|@types%2[fF]node' '$T/log-redirect.json'"
 
 echo "== (2) lockfile integrity entries for private packages"
 check "pnpm-lock.yaml exists" test -f "$T/app/pnpm-lock.yaml"
-check "pnpm-lock.yaml has integrity for lib-a" grep -qE "consona-e2e-lib-a.*integrity: sha512-" "$T/app/pnpm-lock.yaml"
-check "pnpm-lock.yaml has integrity for lib-b" grep -qE "consona-e2e-lib-b.*integrity: sha512-" "$T/app/pnpm-lock.yaml"
-check "pnpm-lock.yaml has integrity for lib-ts" grep -qE "consona-e2e-lib-ts.*integrity: sha512-" "$T/app/pnpm-lock.yaml"
-check "pnpm-lock.yaml has integrity for local-pkg" grep -qE "local-pkg.*integrity: sha512-" "$T/app/pnpm-lock.yaml"
+
+check_lockfile_sha512() {
+  local pkg=$1
+  awk -v pkg="$pkg" '
+    /^packages:/ { in_packages=1; next }
+    in_packages && /^[^ ]/ { in_packages=0 }
+    in_packages && /^  [^ ]/ && $0 ~ pkg {
+      while (getline > 0) {
+        if ($0 ~ /resolution:.*integrity: *sha512-/) { ok=1; exit }
+        if ($0 ~ /^  [^ ]/ || $0 ~ /^[^ ]/) break
+      }
+    }
+    END { exit(ok ? 0 : 1) }
+  ' "$T/app/pnpm-lock.yaml"
+}
+
+check "pnpm-lock.yaml has sha512 integrity for lib-a" check_lockfile_sha512 "consona-e2e-lib-a"
+check "pnpm-lock.yaml has sha512 integrity for lib-b" check_lockfile_sha512 "consona-e2e-lib-b"
+check "pnpm-lock.yaml has sha512 integrity for lib-ts" check_lockfile_sha512 "consona-e2e-lib-ts"
+check "pnpm-lock.yaml has sha512 integrity for local-pkg" check_lockfile_sha512 "local-pkg"
+check "no lockfile line contains a token-shaped string" bash -c "! grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' '$T/app/pnpm-lock.yaml'"
 
 echo "== (3) reinstall with pnpm install --frozen-lockfile after removing node_modules"
 rm -rf "$T/app/node_modules"
@@ -132,14 +164,14 @@ check "pnpm install --frozen-lockfile rc=$rc" test $rc -eq 0
 echo "== (4) require() of packages works"
 OUT=$(cd "$T/app" && node -e '
 const a = require("@'"$OWNER"'/consona-e2e-lib-a");
-const b = require("@'"$OWNER"'/consona-e2e-lib-b");
 const ts = require("@'"$OWNER"'/consona-e2e-lib-ts");
 const loc = require("@e2euser/local-pkg");
 const ms = require("ms");
-console.log(a.greet("world"), b.shout("ok"), ts.slugify("Hello World"), loc.sayLocal(), ms(60000));
+console.log(a.greet("world"), ts.slugify("Hello World"), loc.sayLocal(), ms(60000));
 ')
 echo "      | output: $OUT"
-check "runtime require: lib-a, lib-b, lib-ts, local-pkg, ms" test "$OUT" = "HELLO WORLD! OK! hello-world hello from local-pkg 1m"
+check "runtime require: lib-a (using transitive lib-b), lib-ts, local-pkg, ms" test "$OUT" = "HELLO WORLD! hello-world hello from local-pkg 1m"
+check "transitive lib-b present in node_modules/.pnpm" bash -c "ls -d '$T/app/node_modules/.pnpm/@${OWNER}+consona-e2e-lib-b@'* >/dev/null 2>&1"
 
 echo "== (5) pnpm add / remove of a private package"
 (cd "$T/app" && pnpm remove "@$OWNER/consona-e2e-lib-ts" > "$T/remove.out" 2>&1); rc_rem=$?
@@ -163,9 +195,21 @@ EOF
 show "$T/autodetect-pm.out"
 check "consona install auto-detects pnpm from packageManager field" bash -c "[ $rc_pm -eq 0 ] && grep -q 'consona: using pnpm (package.json packageManager)' '$T/autodetect-pm.out'"
 
-(cd "$T/app" && "$BIN" install --pm npm > "$T/override-npm.out" 2>&1); rc_over=$?
+echo "== (6b) --pm npm override in fresh directory"
+mkdir -p "$T/override-app"
+cp "$T/app/package.json" "$T/app/pnpm-lock.yaml" "$T/override-app/"
+(cd "$T/override-app" && "$BIN" install --pm npm > "$T/override-npm.out" 2>&1); rc_over=$?
 show "$T/override-npm.out"
-check "consona install --pm npm overrides lockfile" bash -c "[ $rc_over -eq 0 ] && grep -q 'consona: using npm (--pm flag)' '$T/override-npm.out'"
+check "consona install --pm npm overrides lockfile in fresh dir rc=$rc_over" test $rc_over -eq 0
+check "pm message says using npm (--pm flag)" grep -q 'consona: using npm (--pm flag)' "$T/override-npm.out"
+
+echo "== (6c) consona install --quiet (pnpm)"
+mkdir -p "$T/quiet-app"
+cp "$T/app/package.json" "$T/app/pnpm-lock.yaml" "$T/quiet-app/"
+(cd "$T/quiet-app" && "$BIN" install --quiet > "$T/quiet.out" 2>&1); rc_quiet=$?
+show "$T/quiet.out"
+check "consona install --quiet rc=$rc_quiet" test $rc_quiet -eq 0
+check "consona install --quiet prints no 'consona: running:' progress" bash -c "! grep -q 'consona: running:' '$T/quiet.out'"
 
 echo "== (7) pnpm audit filters private names"
 (cd "$T/app" && "$BIN" audit > "$T/audit.out" 2>&1); rc_audit=$?
