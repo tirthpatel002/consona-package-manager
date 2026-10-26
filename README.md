@@ -198,6 +198,21 @@ Filters: `--package`, `--owner`, `--event` (name or prefix: `build`,
   (`go test -bench . ./internal/logstore`).
 - Directory `0700`, files `0600`.
 
+## Local folders and other devices (SSH)
+
+```sh
+consona init --username tirth       # once per device: a free local name, scope @tirth
+consona register ~/code/my-lib      # serve the folder live as @tirth/my-lib
+consona remote add devbox devbox    # packages registered on a machine you can ssh into
+npm install @tirth/my-lib           # this device's folders > ssh remotes > GitHub
+```
+
+Every install says where each package came from (`<- local ...`,
+`<- ssh devbox ...`, `<- github ...`). Folders are versioned by content
+hash (`1.0.0-local.3.h2cab0880`) and rebuilt only when they change. Hosts
+in `~/.ssh/config` are found automatically. Details, versioning, caching,
+timings and limits: [docs/local-and-ssh.md](docs/local-and-ssh.md).
+
 ## Undo
 
 ```sh
@@ -262,6 +277,12 @@ secure store); consona only holds them in memory.
 | `internal/creds` | credential resolution order, named-token index, OS secure store (go-keyring) |
 | `internal/logstore` | structured event log: SQLite with JSON-lines fallback, retention, redaction |
 | `internal/redact` | token redaction for every log and error |
+| `internal/identity` | `consona init`: username + device id |
+| `internal/localindex` | registered folders of this device |
+| `internal/source/local` | `Source`: registered folders, content-hash versions |
+| `internal/source/sshremote` | `Source`: other devices over ssh (`remote-serve` protocol, ssh-config discovery, list cache) |
+| `internal/source/chain` | resolution order local > ssh > GitHub, resolution events |
+| `internal/localcli` | CLI for init/register/remote/which |
 | `internal/builder/npmpack` | `Builder`: npm tarball via `npm pack` |
 | `internal/adapter/npm` | `Adapter`: npmrc setup, npm registry protocol, login lookup, `npm` wrapper |
 | `internal/daemon` | loopback server mounting each adapter at `/<name>/`, auto-start |
@@ -296,7 +317,8 @@ Env:
   the OS cache dir (`os.UserCacheDir`) plus `consona`: `~/.cache/consona` on
   Linux (`$XDG_CACHE_HOME/consona` if set), `~/Library/Caches/consona` on
   macOS, `%LocalAppData%\consona` on Windows.
-- `CONSONA_CONFIG_DIR`: token index location (default: see above).
+- `CONSONA_CONFIG_DIR`: identity, registered folders, remotes, token index (default: see above).
 - `CONSONA_TOKEN`, `CONSONA_TOKEN_<OWNER>`, `GH_TOKEN`, `GITHUB_TOKEN`,
   `GH_CONFIG_DIR`: credentials (see [GitHub credentials](#github-credentials)).
 - `CONSONA_LOG_BACKEND`, `CONSONA_LOG_MAX_AGE`, `CONSONA_LOG_MAX_SIZE_MB`: log store.
+- SSH options: see [docs/local-and-ssh.md](docs/local-and-ssh.md#environment).

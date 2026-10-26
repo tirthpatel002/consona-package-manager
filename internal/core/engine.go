@@ -85,7 +85,7 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 	e.mu.Lock()
 	m, ok := e.memo[key]
 	e.mu.Unlock()
-	if ok && time.Since(m.at) < e.TTL {
+	if ok && time.Since(m.at) < e.TTL && !e.live(ref) {
 		return m.pkgs, nil
 	}
 	revs, err := e.Source.Revisions(ctx, ref)
@@ -105,6 +105,17 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 		if bs, err := os.ReadFile(f); err == nil && json.Unmarshal(bs, &inf) == nil {
 			infos[i] = &inf
 			return nil
+		}
+		if pb, ok := e.Source.(Prebuilt); ok {
+			got, ok, err := pb.PrebuiltInfo(ctx, ref, revs[i])
+			if err != nil {
+				return fmt.Errorf("%s@%s: %w", name, revs[i].Version, err)
+			}
+			if ok {
+				infos[i] = got
+				bs, _ := json.Marshal(got)
+				return writeFileAtomic(f, bs)
+			}
 		}
 		return e.withSource(ctx, ref, revs[i].Commit, func(dir string) error {
 			got, err := b.Inspect(dir)
@@ -175,21 +186,31 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 	var art *Artifact
 	started := time.Now()
 	ev := logstore.Entry{Ecosystem: b.Ecosystem(), Package: name, Owner: ref.Owner, Repo: ref.Name, Version: v.Version, CommitSHA: v.Revision.Commit}
-	if v.Info != nil && v.Info.NeedsBuild {
-		st := ev
-		st.Event, st.Level, st.Message = logstore.EvBuildStart, "info", "building with the package's own build scripts"
-		logstore.Log(st)
+	prebuilt := false
+	var err error
+	if pb, ok := e.Source.(Prebuilt); ok {
+		art, prebuilt, err = pb.FetchPrebuilt(ctx, ref, v.Revision, dir)
 	}
-	err := e.withSource(ctx, ref, v.Revision.Commit, func(src string) error {
-		var err error
-		art, err = b.Build(ctx, src, BuildRequest{Name: name, Version: v.Version, Revision: v.Revision, OutDir: dir})
-		return err
-	})
+	if !prebuilt && err == nil {
+		if v.Info != nil && v.Info.NeedsBuild {
+			st := ev
+			st.Event, st.Level, st.Message = logstore.EvBuildStart, "info", "building with the package's own build scripts"
+			logstore.Log(st)
+		}
+		err = e.withSource(ctx, ref, v.Revision.Commit, func(src string) error {
+			var err error
+			art, err = b.Build(ctx, src, BuildRequest{Name: name, Version: v.Version, Revision: v.Revision, OutDir: dir})
+			return err
+		})
+	}
 	ev.Event, ev.DurationMS, ev.Level, ev.Result = logstore.EvBuildFinish, time.Since(started).Milliseconds(), "info", "ok"
+	if prebuilt {
+		ev.Message = "prebuilt artifact fetched from source"
+	}
 	if err != nil {
 		ev.Level, ev.Result, ev.Message = "error", "fail", err.Error()
 	}
-	if v.Info != nil && v.Info.NeedsBuild || err != nil {
+	if (v.Info != nil && v.Info.NeedsBuild && !prebuilt) || err != nil {
 		logstore.Log(ev)
 	} else {
 		logstore.LogQuiet(ev)

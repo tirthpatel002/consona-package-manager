@@ -73,7 +73,7 @@ func warm(baseURL string, names []string) {
 // packages with a build step it also starts building the latest version,
 // the one npm most often picks.
 func (h *handler) warmRefs(names []string) {
-	scopes := RoutedScopes()
+	scopes := privateScopes()
 	for _, n := range names {
 		ref, ok := privateRef(n, scopes)
 		if !ok {

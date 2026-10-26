@@ -81,7 +81,7 @@ func (h *handler) bulkAudit(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "bad audit body")
 		return
 	}
-	withheld := FilterBulk(payload, RoutedScopes())
+	withheld := FilterBulk(payload, privateScopes())
 	logstore.Log(logstore.Entry{Event: logstore.EvAuditFilter, Level: "info", Ecosystem: "npm", Result: "ok",
 		Message: fmt.Sprintf("audit: forwarding %d public package names, withheld %d private", len(payload), withheld)})
 	if len(payload) == 0 {
@@ -99,7 +99,7 @@ func (h *handler) quickAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logstore.Log(logstore.Entry{Event: logstore.EvAuditFilter, Level: "info", Ecosystem: "npm", Result: "ok",
-		Message: fmt.Sprintf("audit (quick): withheld %d private", FilterQuick(tree, RoutedScopes()))})
+		Message: fmt.Sprintf("audit (quick): withheld %d private", FilterQuick(tree, privateScopes()))})
 	h.forward(w, r, quickPath, tree)
 }
 

@@ -180,7 +180,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	read := r.Method == http.MethodGet || r.Method == http.MethodHead
-	scopes := RoutedScopes()
+	scopes := privateScopes()
 	ref, file, ok := parse(r.URL.Path)
 	ok = ok && scopes[strings.ToLower(ref.Owner)]
 	switch o := mentionsScope(r, scopes); {
@@ -219,6 +219,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	pkgs, err := h.e.Packages(r.Context(), h.b, ref, name)
 	if err != nil {
+		if p := h.e.FindCached(h.b, ref, file); p != "" { // e.g. remote offline: a built tarball is still good
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, p)
+			return
+		}
 		h.fail(w, ref, name, err)
 		return
 	}
@@ -238,6 +243,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, bl.Path)
 			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 				Repo: ref.Name, Version: p.Version, CommitSHA: p.Revision.Commit, Result: "ok", DurationMS: time.Since(start).Milliseconds()})
+			return
+		}
+		// A version the source no longer lists (a local folder changed
+		// since the lockfile was written) is still served if it was built.
+		if p := h.e.FindCached(h.b, ref, file); p != "" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, p)
 			return
 		}
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)

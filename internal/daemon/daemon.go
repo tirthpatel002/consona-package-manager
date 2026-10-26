@@ -102,6 +102,7 @@ func Serve(c Config, src core.Source) error {
 		mux.Handle(prefix+"/", http.StripPrefix(prefix, a.Handler(e, c.BaseURL()+prefix)))
 	}
 	srv := &http.Server{Handler: logRequests(mux)}
+	mountExtras(mux, src)
 	mux.HandleFunc("/-/consona/ping", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": c.identity()})
 	})
