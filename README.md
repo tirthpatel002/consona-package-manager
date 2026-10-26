@@ -1,7 +1,7 @@
 # consona
 
-**In two lines:** consona is a small local registry that lets npm install your private GitHub repos, local folders and packages on your other machines as normal `@owner/name` packages.
-Set it up once with `consona setup`, and `npm install` just works, with everything public still coming from npm as before.
+**In two lines:** consona turns every package you own, wherever it lives, into a plain `npm install`: private GitHub repos, folders on this machine, and packages on your other machines over SSH, all served as `@owner/name` from one local registry, with no publishing and no repo changes.
+Run `consona setup` once: local copies win over remote ones so nothing is duplicated, and public npm keeps working exactly as before.
 
 ## Executive summary
 
