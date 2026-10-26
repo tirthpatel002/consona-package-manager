@@ -317,6 +317,10 @@ func (s *Source) Owners(ctx context.Context) ([]string, error) {
 			if p == "/user" {
 				err = json.NewDecoder(resp.Body).Decode(&one)
 				addOwner(one.Login)
+				if one.Login != "" {
+					logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "info", Owner: one.Login,
+						CredentialSource: c.Source, Result: "ok", Message: "GitHub account @" + one.Login + " via " + c.Source})
+				}
 			} else {
 				err = json.NewDecoder(resp.Body).Decode(&many)
 				for _, o := range many {

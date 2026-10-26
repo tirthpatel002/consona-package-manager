@@ -17,7 +17,7 @@ import (
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 
-	_ "github.com/tirthpatel002/consona-package-manager/internal/adapter/npm" // adapters register themselves
+	npmadapter "github.com/tirthpatel002/consona-package-manager/internal/adapter/npm" // adapters register themselves
 )
 
 const usage = `consona: private packages from your GitHub repos, zero repo setup.
@@ -34,6 +34,10 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
   consona logs [filters] | export | prune | clear | info
                                        structured event log (see "consona logs help")
   consona version                      print the version
+
+Every command prints what it is doing on stderr (npm config lines, credential used, daemon
+health, where each package came from, warnings). --quiet or CONSONA_QUIET=1 turns that off;
+install and audit then also run npm without --verbose.
 
 GitHub credentials (any one is enough; gh is supported but not required):
 per-owner env CONSONA_TOKEN_<OWNER>, named tokens ("consona token add"),
@@ -63,12 +67,16 @@ func fail(format string, a ...any) int {
 }
 
 func run(args []string) int {
+	args, quiet = parseQuiet(args)
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage+localcli.Usage)
 		return 2
 	}
 	localcli.Version = version
 	cfg := daemon.Load()
+	if args[0] != "daemon" || (len(args) > 1 && args[1] != "run" && args[1] != "supervise") {
+		defer logstore.AddTee(sayEvent)() // this process's own events, live
+	}
 	if logsEvents[args[0]] { // commands that record events (the daemon opens its own)
 		if logs := daemon.OpenLogs(cfg, false); logs != nil {
 			defer logs.Close()
@@ -90,13 +98,18 @@ func run(args []string) int {
 		for i := 1; i < len(args); i++ {
 			switch {
 			case args[i] == "--undo":
+				before := readNpmrc()
+				say("removing consona's lines from the npm config")
 				path, err := npm.Teardown(ctx)
 				if err != nil {
 					return fail("%v", err)
 				}
+				sayNpmrcDiff(path, before, readNpmrc())
+				say("removing auto-start")
 				if err := daemon.RemoveAutostart(cfg); err != nil {
 					return fail("removing auto-start: %v", err)
 				}
+				say("stopping the daemon on %s", cfg.Addr())
 				daemon.Stop(cfg)
 				fmt.Printf("consona: removed consona settings from %s (npm uses your previous registry again), removed auto-start, stopped the daemon\n", path)
 				return 0
@@ -112,8 +125,15 @@ func run(args []string) int {
 			}
 		}
 		src := github.New()
+		say("finding your GitHub owners (credential order: CONSONA_TOKEN_<OWNER>, named tokens, CONSONA_TOKEN, GH_TOKEN, GITHUB_TOKEN, gh login)")
 		owners, err := src.Owners(ctx)
+		if err == nil {
+			say("GitHub owners: @%s", strings.Join(owners, ", @"))
+		}
 		local := localcli.ExtraOwners() // this device's username, registered and remote scopes
+		if len(local) > 0 {
+			say("this device's scopes (username, registered folders, ssh remotes): @%s", strings.Join(local, ", @"))
+		}
 		if err != nil {
 			if len(extra) == 0 && len(local) == 0 { // nothing to serve without GitHub
 				return fail("%v", err)
@@ -125,23 +145,28 @@ func run(args []string) int {
 			}
 		}
 		owners = dedupe(append(append(owners, extra...), local...))
+		before := readNpmrc()
+		say("writing the npm config (registry %s, private scopes, retry timeouts, loglevel=verbose unless you set a loglevel)", npmBase)
 		path, err := npm.Setup(ctx, npmBase, owners)
 		if err != nil {
 			return fail("%v", err)
 		}
+		sayNpmrcDiff(path, before, readNpmrc())
 		auto := "auto-start: off (--no-autostart)"
 		if !noAutostart {
+			say("installing auto-start (start at login, restart on crash)")
 			unit, err := daemon.InstallAutostart(cfg)
 			if err != nil {
 				return fail("registering auto-start: %v (rerun with --no-autostart to skip)", err)
 			}
+			say("auto-start installed: %s", unit)
 			auto = "auto-start at login + restart on crash: " + unit
 			if vars := tokenEnvVars(); len(vars) > 0 {
 				auto += "\nconsona: note: the auto-started daemon does not see " + strings.Join(vars, ", ") +
 					" from this shell; it uses named tokens (`consona token add`) and the gh login. Use --no-autostart to keep using env vars."
 			}
 		}
-		if err := daemon.Ensure(cfg); err != nil {
+		if err := ensureDaemon(cfg); err != nil {
 			return fail("%v", err)
 		}
 		fmt.Println("consona: " + auto)
@@ -158,7 +183,8 @@ func run(args []string) int {
 		if err := npm.CheckSetup(npmBase); err != nil {
 			return fail("%v", err)
 		}
-		if err := daemon.Ensure(cfg); err != nil {
+		say("npm is set up for consona (%s)", npmadapter.UserConfig())
+		if err := ensureDaemon(cfg); err != nil {
 			return fail("%v", err)
 		}
 		start := time.Now()
@@ -166,7 +192,12 @@ func run(args []string) int {
 		if args[0] == "audit" {
 			cmdName = "audit"
 		}
-		code := npm.Exec(ctx, npmBase, append([]string{cmdName}, args[1:]...))
+		npmCmd := npmArgs(append([]string{cmdName}, args[1:]...), quiet, npmadapter.OwnsLoglevel())
+		say("running: npm %s (private scopes via %s, everything else via %s)", strings.Join(npmCmd, " "), npmBase, npmadapter.Upstream())
+		stopFollow := followDaemon(cfg, start)
+		code := npm.Exec(ctx, npmBase, npmCmd)
+		stopFollow()
+		say("npm %s exited with code %d after %s", cmdName, code, time.Since(start).Round(time.Millisecond))
 		if code == 0 && cmdName == "install" {
 			localcli.AfterInstall(ctx, cfg, npm, npmBase, append([]string{cmdName}, args[1:]...), start)
 		}
@@ -200,7 +231,7 @@ func run(args []string) int {
 			}
 			return 0
 		case "start", "status":
-			if err := daemon.Ensure(cfg); err != nil {
+			if err := ensureDaemon(cfg); err != nil {
 				return fail("%v", err)
 			}
 			fmt.Printf("consona: daemon running on %s (log %s)\n", cfg.Addr(), cfg.LogPath())
@@ -244,4 +275,10 @@ func tokenEnvVars() []string {
 		}
 	}
 	return out
+}
+
+// readNpmrc is the user npmrc's content ("" if missing).
+func readNpmrc() string {
+	b, _ := os.ReadFile(npmadapter.UserConfig())
+	return string(b)
 }

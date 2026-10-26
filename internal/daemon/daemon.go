@@ -95,6 +95,8 @@ func Serve(c Config, src core.Source) error {
 			}
 		}()
 	}
+	ring := newEventRing(4096)
+	defer logstore.AddTee(ring.add)()
 	logstore.Log(logstore.Entry{Event: logstore.EvDaemonStart, Level: "info", Result: "ok", Message: fmt.Sprintf("listening on %s (home %s)", c.Addr(), c.Home)})
 	defer logstore.Log(logstore.Entry{Event: logstore.EvDaemonStop, Level: "info", Result: "ok", Message: "stopped"})
 	mux := http.NewServeMux()
@@ -104,6 +106,7 @@ func Serve(c Config, src core.Source) error {
 	}
 	srv := &http.Server{Handler: logRequests(mux)}
 	mountExtras(mux, src)
+	mountEvents(mux, ring)
 	mux.HandleFunc("/-/consona/ping", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": c.identity()})
 	})
