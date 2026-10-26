@@ -15,6 +15,7 @@ import (
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 )
 
 // fakeSource knows exactly one repo, o/lib, with tag v1.0.0.
@@ -23,6 +24,12 @@ type fakeSource struct{ calls []string }
 func (f *fakeSource) Describe(r core.Ref) string { return "fake/" + r.String() }
 func (f *fakeSource) Revisions(_ context.Context, r core.Ref) ([]core.Revision, error) {
 	f.calls = append(f.calls, r.String())
+	if r.Name == "denied" {
+		return nil, &github.AccessError{What: "github.com/o/denied", Owner: "o", Attempts: []github.Attempt{
+			{Source: `named token "work" (github_pat_…ab12)`, Status: 401, Kind: github.KindExpired, Detail: "token expired on 2026-01-01 00:00 UTC", Fix: "create a new token at " + github.FineGrainedURL},
+			{Source: "gh login (gho_…cd34)", Status: 403, Kind: github.KindSSO, Detail: "403: the organization uses SAML single sign-on", Fix: "authorize the token for SSO"},
+		}}
+	}
 	if r != (core.Ref{Owner: "o", Name: "lib"}) {
 		return nil, core.ErrNotFound
 	}
@@ -113,6 +120,28 @@ func TestPackumentAndTarballIntegrity(t *testing.T) {
 
 // A routed private name that does not exist is a clear 404 and is never
 // looked up anywhere else (the handler has no upstream to fall back to).
+// Credential failures reach npm as a 403 (not retried) whose message names
+// every credential tried and how to fix it.
+func TestCredentialErrorReachesNpm(t *testing.T) {
+	srv, _ := newServer(t)
+	resp, err := http.Get(srv.URL + "/@o%2fdenied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	msg := body["error"]
+	for _, want := range []string{"@o/denied is private", `named token "work" (github_pat_…ab12): token expired`, github.FineGrainedURL, "gh login (gho_…cd34): 403", "authorize the token for SSO"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("missing %q in %d %q", want, resp.StatusCode, msg)
+		}
+	}
+	if resp.StatusCode != 403 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
 func TestMissingPrivateNameNoFallback(t *testing.T) {
 	srv, src := newServer(t)
 	for _, p := range []string{"/@o%2fmissing", "/@o/missing/-/o-missing-1.0.0.tgz"} {
@@ -123,7 +152,7 @@ func TestMissingPrivateNameNoFallback(t *testing.T) {
 		var body map[string]string
 		json.NewDecoder(resp.Body).Decode(&body)
 		resp.Body.Close()
-		if resp.StatusCode != 404 || !strings.Contains(body["error"], "not found or your gh login cannot access it") {
+		if resp.StatusCode != 404 || !strings.Contains(body["error"], "not found or is not accessible with your GitHub credentials") {
 			t.Fatalf("%s: %d %v", p, resp.StatusCode, body)
 		}
 	}

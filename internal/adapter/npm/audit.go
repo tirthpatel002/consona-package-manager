@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 )
 
 // npm sends audits (every package name + version in the tree, private ones
@@ -80,7 +82,8 @@ func (h *handler) bulkAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	withheld := FilterBulk(payload, RoutedScopes())
-	log.Printf("audit: forwarding %d public package names, withheld %d private", len(payload), withheld)
+	logstore.Log(logstore.Entry{Event: logstore.EvAuditFilter, Level: "info", Ecosystem: "npm", Result: "ok",
+		Message: fmt.Sprintf("audit: forwarding %d public package names, withheld %d private", len(payload), withheld)})
 	if len(payload) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("{}"))
@@ -95,7 +98,8 @@ func (h *handler) quickAudit(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "bad audit body")
 		return
 	}
-	log.Printf("audit (quick): withheld %d private", FilterQuick(tree, RoutedScopes()))
+	logstore.Log(logstore.Entry{Event: logstore.EvAuditFilter, Level: "info", Ecosystem: "npm", Result: "ok",
+		Message: fmt.Sprintf("audit (quick): withheld %d private", FilterQuick(tree, RoutedScopes()))})
 	h.forward(w, r, quickPath, tree)
 }
 

@@ -51,9 +51,21 @@ func AutostartInstalled(c Config) bool {
 
 // serviceEnv is what the daemon needs to behave like the CLI that set it
 // up: its home/port, the npm config it serves, and a PATH with npm/node
-// (used for builds). Never credentials: the gh token is read at runtime.
+// (used for builds), and where to find credentials: the gh config dir and
+// consona's config dir (paths only). Never credentials themselves: tokens
+// are read at request time from the OS secure store or gh.
 func (c Config) serviceEnv() [][2]string {
 	env := [][2]string{{"CONSONA_HOME", c.Home}, {"CONSONA_PORT", strconv.Itoa(c.Port)}, {"PATH", os.Getenv("PATH")}}
+	for _, k := range []string{"CONSONA_CONFIG_DIR", "GH_CONFIG_DIR", "CONSONA_LOG_BACKEND", "CONSONA_LOG_MAX_AGE", "CONSONA_LOG_MAX_SIZE_MB"} {
+		if v := os.Getenv(k); v != "" {
+			if strings.HasSuffix(k, "_DIR") {
+				if abs, err := filepath.Abs(v); err == nil {
+					v = abs
+				}
+			}
+			env = append(env, [2]string{k, v})
+		}
+	}
 	for _, k := range []string{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"} {
 		if v := os.Getenv(k); v != "" {
 			if abs, err := filepath.Abs(v); err == nil {
@@ -210,6 +222,7 @@ func launchdPlist(c Config, exe string) string {
 <key>EnvironmentVariables</key><dict>%s</dict>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>1</integer>
 <key>StandardOutPath</key><string>%s</string>
 <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>

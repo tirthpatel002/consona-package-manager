@@ -13,12 +13,15 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 )
 
 // Config locates the daemon.
@@ -53,6 +56,20 @@ func (c Config) identity() string {
 	return hex.EncodeToString(h[:8])
 }
 
+// OpenLogs opens the structured log store in the consona home and makes
+// it the process default (echoing events to the human log if echo).
+// Callers must Close the result.
+func OpenLogs(c Config, echo bool) *logstore.Async {
+	s, err := logstore.Open(logstore.Dir(c.Home))
+	if err != nil {
+		log.Printf("consona: log store unavailable: %v", err)
+		return nil
+	}
+	a := logstore.NewAsync(s)
+	logstore.SetDefault(a, echo)
+	return a
+}
+
 // Serve runs the daemon in the foreground until stopped.
 func Serve(c Config, src core.Source) error {
 	e := core.NewEngine(src, filepath.Join(c.Home, "cache"))
@@ -60,6 +77,25 @@ func Serve(c Config, src core.Source) error {
 	if err != nil {
 		return err
 	}
+	if logs := OpenLogs(c, true); logs != nil {
+		defer func() {
+			logstore.SetDefault(nil, false)
+			_ = logs.Close()
+		}()
+		prune := func() {
+			if n, err := logs.S.Prune(logstore.DefaultRetention()); err == nil && n > 0 {
+				log.Printf("consona: log store pruned %d old entries", n)
+			}
+		}
+		go func() {
+			prune()
+			for range time.Tick(6 * time.Hour) {
+				prune()
+			}
+		}()
+	}
+	logstore.Log(logstore.Entry{Event: logstore.EvDaemonStart, Level: "info", Result: "ok", Message: fmt.Sprintf("listening on %s (home %s)", c.Addr(), c.Home)})
+	defer logstore.Log(logstore.Entry{Event: logstore.EvDaemonStop, Level: "info", Result: "ok", Message: "stopped"})
 	mux := http.NewServeMux()
 	for _, a := range core.Adapters() {
 		prefix := "/" + a.Name()
@@ -80,6 +116,14 @@ func Serve(c Config, src core.Source) error {
 		}
 		go func() { time.Sleep(50 * time.Millisecond); _ = srv.Close() }()
 	})
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigc)
+	go func() {
+		if _, ok := <-sigc; ok {
+			_ = srv.Close() // flush the log store on a service-manager stop too
+		}
+	}()
 	log.Printf("consona daemon listening on %s (home %s)", c.Addr(), c.Home)
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
 		return err
