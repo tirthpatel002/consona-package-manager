@@ -1,5 +1,17 @@
 # consona
 
+**In two lines:** consona is a small local registry that lets npm install your private GitHub repos, local folders and packages on your other machines as normal `@owner/name` packages.
+Set it up once with `consona setup`, and `npm install` just works, with everything public still coming from npm as before.
+
+## Executive summary
+
+- **Problem:** sharing private code as npm packages usually means running a private registry, publishing every change, or hand-writing git URLs and relative paths.
+- **What consona does:** a background service on your machine answers npm first. `@owner/name` resolves straight from github.com/owner/name (versions from git tags, or `0.0.0-<commit>` without tags), with no changes to the repo. Registered local folders and packages on other devices over SSH work the same way, and local wins over GitHub, so nothing is duplicated.
+- **What stays the same:** npm keeps all of its own features. Public packages, `npm login`, `npm publish` and `npm audit` go to your normal registry, and private names are never sent to it or published there.
+- **Credentials:** it uses whatever GitHub access you already have (per-owner or named tokens, `GH_TOKEN`/`GITHUB_TOKEN`, or the `gh` login) and never requires one specific kind.
+- **Trust and visibility:** builds run locally and are cached by commit, lockfiles get real integrity hashes, every command shows live verbose output (`--quiet` turns it off), and a structured log records everything without token values.
+- **Platforms:** macOS and Linux tested; the same commands and lockfiles on every OS.
+
 Use your private GitHub repos as npm packages, with no registry to run and
 nothing to change in the repos. `npm install @your-github-name/your-repo`
 just works for every repo your GitHub credentials can read. Everything else
