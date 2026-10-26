@@ -1,0 +1,310 @@
+package npm
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+
+	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
+	"github.com/tirthpatel002/consona-package-manager/internal/core"
+)
+
+// Handler is npm's registry (setup points npm's `registry` here):
+//   - routed private scopes are served from their GitHub repos and never
+//     looked up publicly (a name it cannot serve is a clear 404);
+//   - audit requests are forwarded upstream with private names removed
+//     (audit.go);
+//   - any other request goes to the user's previous ("upstream") registry,
+//     unless it names a private scope (reads: 404, writes: 403):
+//     anonymous reads, and unscoped package reads on registry.npmjs.org
+//     (public by definition), are a 302, so that data never passes through
+//     consona; anything needing the user's login (whoami, private or
+//     authenticated-mirror packages, publish, login, dist-tag, ...) is
+//     forwarded as-is with that login added (see authFor).
+func (Adapter) Handler(e *core.Engine, baseURL string) http.Handler {
+	return &handler{e: e, base: strings.TrimRight(baseURL, "/"), b: npmpack.Builder{}}
+}
+
+type handler struct {
+	e    *core.Engine
+	base string
+	b    core.Builder
+
+	upstreamURL string // tests only; default Upstream()
+	noWarm      bool   // tests only: no background prebuild/prefetch
+}
+
+// authFor is the Authorization to send upstream. npm holds a placeholder
+// token for the daemon (see Placeholder), which stands for the user's own
+// login for the upstream registry, looked up as npm would (see auth.go). A
+// real token (from `npm login` made through consona) is passed through.
+// Requests from another user's processes never get this user's login.
+func (h *handler) authFor(r *http.Request, up string) (string, login, *client) {
+	a := r.Header.Get("Authorization")
+	if a != "" && a != "Bearer "+Placeholder {
+		return a, login{}, nil
+	}
+	c, same := clientFor(r)
+	if !same {
+		return "", login{}, nil
+	}
+	lg := c.loginFor(up)
+	return lg.header, lg, c
+}
+
+// unscopedPackage matches /name and /name/-/file.tgz.
+func unscopedPackage(p string) bool {
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if parts[0] == "" || strings.HasPrefix(parts[0], "@") || strings.HasPrefix(parts[0], "-") {
+		return false
+	}
+	return len(parts) == 1 || (len(parts) == 3 && parts[1] == "-")
+}
+
+// proxy forwards the request as-is (method, body, npm headers such as
+// npm-otp) to the upstream registry with auth, and relays the answer.
+func (h *handler) proxy(w http.ResponseWriter, r *http.Request, up, auth string, onOK func()) {
+	target, err := url.Parse(up)
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, "bad upstream registry "+up)
+		return
+	}
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out.Header.Del("Authorization")
+			if auth != "" {
+				pr.Out.Header.Set("Authorization", auth)
+			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if onOK != nil && resp.StatusCode/100 == 2 {
+				onOK()
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			jsonErr(w, http.StatusBadGateway, "consona: upstream registry "+up+": "+err.Error())
+		},
+	}
+	rp.ServeHTTP(w, r)
+}
+
+// logout handles `npm logout` while npm holds the placeholder: the user's
+// real upstream token is revoked upstream and, if it is written in their
+// user npmrc, removed from it (npm itself removes the placeholder). Routing
+// is unaffected and a later `npm login` stores a new token for the daemon.
+func (h *handler) logout(w http.ResponseWriter, r *http.Request, up string, lg login, c *client) {
+	if lg.token == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+		return
+	}
+	r.URL.Path = "/-/user/token/" + lg.token
+	r.URL.RawPath = ""
+	h.proxy(w, r, up, lg.header, func() {
+		if lg.src.file == c.userFile() {
+			go forgetLogin(lg.src)
+		}
+	})
+}
+
+func (h *handler) upstream() string {
+	if h.upstreamURL != "" {
+		return h.upstreamURL
+	}
+	return Upstream()
+}
+
+// mentionsScope reports which routed scope, if any, a request names
+// anywhere in its path or query (e.g. /-/package/@o%2fx/dist-tags).
+func mentionsScope(r *http.Request, scopes map[string]bool) string {
+	q, _ := url.QueryUnescape(r.URL.RawQuery)
+	s := strings.ToLower(r.URL.Path + "?" + q)
+	for o := range scopes {
+		if strings.Contains(s, "@"+o+"/") {
+			return o
+		}
+	}
+	return ""
+}
+
+// parse splits "/@scope/name[/-/file.tgz]" (path already %2f-decoded).
+func parse(p string) (ref core.Ref, file string, ok bool) {
+	p = strings.TrimPrefix(p, "/")
+	if !strings.HasPrefix(p, "@") {
+		return ref, "", false
+	}
+	parts := strings.Split(p[1:], "/")
+	switch {
+	case len(parts) == 2:
+	case len(parts) == 4 && parts[2] == "-" && strings.HasSuffix(parts[3], ".tgz"):
+		file = parts[3]
+	default:
+		return ref, "", false
+	}
+	if parts[0] == "" || parts[1] == "" {
+		return ref, "", false
+	}
+	return core.Ref{Owner: parts[0], Name: parts[1]}, file, true
+}
+
+func jsonErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/-/warm" && r.Method == http.MethodPost:
+		var names []string
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&names)
+		h.warmRefs(names)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == bulkPath:
+		h.bulkAudit(w, r)
+		return
+	case r.Method == http.MethodPost && r.URL.Path == quickPath:
+		h.quickAudit(w, r)
+		return
+	}
+	read := r.Method == http.MethodGet || r.Method == http.MethodHead
+	scopes := RoutedScopes()
+	ref, file, ok := parse(r.URL.Path)
+	ok = ok && scopes[strings.ToLower(ref.Owner)]
+	switch o := mentionsScope(r, scopes); {
+	case ok && read:
+		// served below
+	case o != "" && !read:
+		jsonErr(w, http.StatusForbidden, fmt.Sprintf("consona: @%s is a private scope served from GitHub; it is never published or changed on a public registry (release by pushing a git tag)", o))
+		return
+	case o != "":
+		jsonErr(w, http.StatusNotFound, fmt.Sprintf("consona: @%s is a private scope; this request is not sent to the public registry", o))
+		return
+	default:
+		up := h.upstream()
+		auth, lg, c := h.authFor(r, up)
+		if r.Method == http.MethodDelete && r.URL.Path == "/-/user/token/"+Placeholder {
+			h.logout(w, r, up, lg, c)
+			return
+		}
+		if read && (auth == "" || (up+"/" == DefaultUpstream && unscopedPackage(r.URL.Path))) {
+			target := up + r.URL.EscapedPath()
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		h.proxy(w, r, up, auth, nil)
+		return
+	}
+	name := "@" + ref.Owner + "/" + ref.Name
+	pkgs, err := h.e.Packages(r.Context(), h.b, ref, name)
+	if err != nil {
+		h.fail(w, ref, name, err)
+		return
+	}
+	if file != "" {
+		for _, p := range pkgs {
+			if npmpack.FileName(name, p.Version) != file {
+				continue
+			}
+			bl := p.Built
+			if bl == nil {
+				if bl, err = h.e.Build(r.Context(), h.b, ref, name, p); err != nil {
+					h.fail(w, ref, name, err)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, bl.Path)
+			return
+		}
+		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
+		return
+	}
+	if !h.noWarm {
+		go h.prebuild(ref, name, pkgs)
+		go h.warmDeps(pkgs, scopes)
+	}
+	body, err := Packument(name, h.base, pkgs)
+	if err != nil {
+		jsonErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// fail answers with one clear message. Not-found is a 404; a build failure
+// is a 422 so npm stops at once instead of retrying a deterministic failure.
+func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err error) {
+	var msg string
+	code := http.StatusBadGateway
+	switch {
+	case errors.Is(err, core.ErrNotFound):
+		code = http.StatusNotFound
+		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %s was not found or your gh login cannot access it. Check the name, request access, or run `gh auth login`.", name, ref.Owner, h.e.Source.Describe(ref))
+	case errors.Is(err, core.ErrBuild):
+		code = http.StatusUnprocessableEntity
+		msg = err.Error()
+	default:
+		msg = fmt.Sprintf("%s: %v", name, err)
+	}
+	h.e.ReportError(msg)
+	jsonErr(w, code, msg)
+}
+
+// Packument renders the npm registry document for a package. Versions not
+// built yet carry their declared manifest and tarball URL without hashes;
+// npm then records the integrity of the tarball it downloads.
+func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
+	versions := map[string]any{}
+	var list []string
+	for _, p := range pkgs {
+		raw := p.Info.Manifest
+		if p.Built != nil {
+			raw = p.Built.Artifact.Manifest
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, err
+		}
+		m["name"], m["version"], m["_id"] = name, p.Version, name+"@"+p.Version
+		if p.Revision.Commit != "" {
+			m["gitHead"] = p.Revision.Commit
+		}
+		dist := map[string]any{"tarball": base + "/" + name + "/-/" + npmpack.FileName(name, p.Version)}
+		if p.Built != nil {
+			dist["shasum"] = p.Built.Artifact.SHA1
+			dist["integrity"] = "sha512-" + p.Built.Artifact.SHA512
+		}
+		m["dist"] = dist
+		versions[p.Version] = m
+		list = append(list, p.Version)
+	}
+	return json.Marshal(map[string]any{
+		"_id":       name,
+		"name":      name,
+		"dist-tags": map[string]string{"latest": core.Latest(list)},
+		"versions":  versions,
+	})
+}
