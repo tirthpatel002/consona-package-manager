@@ -11,9 +11,11 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 )
 
 // Handler is npm's registry (setup points npm's `registry` here):
@@ -178,7 +180,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	read := r.Method == http.MethodGet || r.Method == http.MethodHead
-	scopes := RoutedScopes()
+	scopes := privateScopes()
 	ref, file, ok := parse(r.URL.Path)
 	ok = ok && scopes[strings.ToLower(ref.Owner)]
 	switch o := mentionsScope(r, scopes); {
@@ -203,14 +205,25 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				target += "?" + r.URL.RawQuery
 			}
 			http.Redirect(w, r, target, http.StatusFound)
+			logstore.LogQuiet(logstore.Entry{Event: logstore.EvRegistryRedirect, Level: "debug", Ecosystem: "npm",
+				Package: pkgName(r.URL.Path), HTTPStatus: http.StatusFound, Result: "redirect", Message: r.Method + " " + r.URL.Path})
 			return
 		}
+		start := time.Now()
 		h.proxy(w, r, up, auth, nil)
+		logstore.LogQuiet(logstore.Entry{Event: logstore.EvAuthForward, Level: "info", Ecosystem: "npm", Package: pkgName(r.URL.Path),
+			Result: "forwarded", DurationMS: time.Since(start).Milliseconds(), Message: fmt.Sprintf("%s %s forwarded to the upstream registry (login attached: %v)", r.Method, r.URL.Path, auth != "")})
 		return
 	}
 	name := "@" + ref.Owner + "/" + ref.Name
+	start := time.Now()
 	pkgs, err := h.e.Packages(r.Context(), h.b, ref, name)
 	if err != nil {
+		if p := h.e.FindCached(h.b, ref, file); p != "" { // e.g. remote offline: a built tarball is still good
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, p)
+			return
+		}
 		h.fail(w, ref, name, err)
 		return
 	}
@@ -228,6 +241,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, bl.Path)
+			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+				Repo: ref.Name, Version: p.Version, CommitSHA: p.Revision.Commit, Result: "ok", DurationMS: time.Since(start).Milliseconds()})
+			return
+		}
+		// A version the source no longer lists (a local folder changed
+		// since the lockfile was written) is still served if it was built.
+		if p := h.e.FindCached(h.b, ref, file); p != "" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, p)
 			return
 		}
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
@@ -252,24 +274,53 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
+	logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallResolve, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+		Repo: ref.Name, Result: "ok", DurationMS: time.Since(start).Milliseconds(), Fields: map[string]any{"versions": len(pkgs)}})
 }
 
-// fail answers with one clear message. Not-found is a 404; a build failure
-// is a 422 so npm stops at once instead of retrying a deterministic failure.
+// pkgName extracts the package name from a registry path ("" if none).
+func pkgName(p string) string {
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" || strings.HasPrefix(parts[0], "-") {
+		return ""
+	}
+	if strings.HasPrefix(parts[0], "@") && len(parts) > 1 {
+		return parts[0] + "/" + parts[1]
+	}
+	return parts[0]
+}
+
+// fail answers with one clear message. Not-found is a 404; a credential
+// problem a 403 and a build failure a 422, so npm stops at once instead of
+// retrying (npm retries 5xx and 429). Credential errors name every source
+// tried and how to fix it; they also go to the daemon log and the store.
 func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err error) {
 	var msg string
 	code := http.StatusBadGateway
+	ecode := "upstream"
+	var coder interface{ Code() string }
+	if errors.As(err, &coder) {
+		ecode = coder.Code()
+	}
 	switch {
+	case errors.Is(err, core.ErrAccess):
+		code = http.StatusForbidden
+		if errors.Is(err, core.ErrNotFound) {
+			code = http.StatusNotFound
+		}
+		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %v", name, ref.Owner, err)
 	case errors.Is(err, core.ErrNotFound):
-		code = http.StatusNotFound
-		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %s was not found or your gh login cannot access it. Check the name, request access, or run `gh auth login`.", name, ref.Owner, h.e.Source.Describe(ref))
+		code, ecode = http.StatusNotFound, "not-found"
+		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %s was not found or is not accessible with your GitHub credentials. Check the name or request access; `consona token test` shows what each credential can see.", name, ref.Owner, h.e.Source.Describe(ref))
 	case errors.Is(err, core.ErrBuild):
-		code = http.StatusUnprocessableEntity
+		code, ecode = http.StatusUnprocessableEntity, "build-failed"
 		msg = err.Error()
 	default:
 		msg = fmt.Sprintf("%s: %v", name, err)
 	}
 	h.e.ReportError(msg)
+	logstore.Log(logstore.Entry{Event: logstore.EvError, Level: "error", Ecosystem: "npm", Package: name, Owner: ref.Owner, Repo: ref.Name,
+		Result: "fail", HTTPStatus: code, ErrorCode: ecode, Message: msg})
 	jsonErr(w, code, msg)
 }
 

@@ -81,6 +81,7 @@ func TestLaunchdPlist(t *testing.T) {
 		"Label":            "string:dev.consona.consona",
 		"RunAtLoad":        "true:",
 		"KeepAlive":        "true:",
+		"ThrottleInterval": "integer:1",
 		"ProgramArguments": "array:<string>/usr/local/bin/consona</string><string>daemon</string><string>run</string>",
 		"StandardOutPath":  "string:/home/u/.cache/consona/daemon.log",
 	} {
@@ -90,6 +91,26 @@ func TestLaunchdPlist(t *testing.T) {
 	}
 	if !strings.Contains(m["EnvironmentVariables"], "<key>CONSONA_HOME</key><string>/home/u/.cache/consona</string>") || strings.Contains(p, "ghp_") {
 		t.Fatalf("env: %s", m["EnvironmentVariables"])
+	}
+}
+
+// The service gets paths that tell it where credentials live, never values.
+func TestServiceEnvPassesCredentialLocationsOnly(t *testing.T) {
+	t.Setenv("GH_CONFIG_DIR", "/home/u/.config/gh-work")
+	t.Setenv("CONSONA_CONFIG_DIR", "/home/u/.config/consona")
+	t.Setenv("CONSONA_KEYRING_SERVICE", "dev.consona.tokens.e2e-test")
+	t.Setenv("npm_config_cache", "/tmp/npm-cache")
+	t.Setenv("GH_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+	t.Setenv("CONSONA_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
+	u := systemdUnit(testConfig(t), "/usr/bin/consona")
+	if !strings.Contains(u, `Environment="CONSONA_KEYRING_SERVICE=dev.consona.tokens.e2e-test"`) || !strings.Contains(u, `Environment="npm_config_cache=/tmp/npm-cache"`) {
+		t.Fatalf("missing keyring service / npm cache:\n%s", u)
+	}
+	if !strings.Contains(u, `Environment="GH_CONFIG_DIR=/home/u/.config/gh-work"`) || !strings.Contains(u, `Environment="CONSONA_CONFIG_DIR=/home/u/.config/consona"`) {
+		t.Fatalf("missing config dirs:\n%s", u)
+	}
+	if strings.Contains(u, "ghp_") || strings.Contains(u, "GH_TOKEN") || strings.Contains(u, "CONSONA_TOKEN") {
+		t.Fatalf("token in unit:\n%s", u)
 	}
 }
 

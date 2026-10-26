@@ -36,6 +36,13 @@ type Revision struct {
 // fallback to a public registry.
 var ErrNotFound = errors.New("not found or not accessible")
 
+// ErrAccess means no available credential could read the package source
+// (rejected, expired, not authorized, rate limited). Errors that are
+// ErrAccess carry a message naming each credential tried and how to fix
+// it; when every credential just could not see the repo they are also
+// ErrNotFound.
+var ErrAccess = errors.New("no credential could read the source")
+
 // Source lists versions of a package and fetches its source tree.
 type Source interface {
 	// Describe returns a human-readable location, e.g. "github.com/o/n".

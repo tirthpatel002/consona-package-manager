@@ -94,7 +94,7 @@ func lineKind(line string) (kind, key, val string) {
 	case k == "registry" && daemonURL.MatchString(v):
 		return "registry", k, v
 	case strings.HasSuffix(k, ":registry") && strings.HasPrefix(k, "@") && daemonURL.MatchString(v):
-		return "scope", strings.TrimSuffix(strings.TrimPrefix(k, "@"), ":registry"), v
+		return "scope", strings.TrimSuffix(strings.TrimLeft(k, "@"), ":registry"), v
 	case daemonNerf.MatchString(k):
 		return "token", k, v
 	}
@@ -189,7 +189,7 @@ func UpdateNpmrc(content, baseURL string, owners []string) (string, error) {
 		}
 	}
 	for _, o := range owners {
-		o = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(o), "@"))
+		o = strings.ToLower(strings.TrimLeft(strings.TrimSpace(o), "@"))
 		if o == "" {
 			continue
 		}

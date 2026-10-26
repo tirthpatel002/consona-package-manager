@@ -51,16 +51,33 @@ func AutostartInstalled(c Config) bool {
 
 // serviceEnv is what the daemon needs to behave like the CLI that set it
 // up: its home/port, the npm config it serves, and a PATH with npm/node
-// (used for builds). Never credentials: the gh token is read at runtime.
+// (used for builds), and where to find credentials: the gh config dir and
+// consona's config dir (paths only). Never credentials themselves: tokens
+// are read at request time from the OS secure store or gh.
 func (c Config) serviceEnv() [][2]string {
 	env := [][2]string{{"CONSONA_HOME", c.Home}, {"CONSONA_PORT", strconv.Itoa(c.Port)}, {"PATH", os.Getenv("PATH")}}
-	for _, k := range []string{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"} {
+	for _, k := range []string{"CONSONA_CONFIG_DIR", "GH_CONFIG_DIR", "CONSONA_LOG_DIR", "CONSONA_LOG_BACKEND", "CONSONA_LOG_MAX_AGE", "CONSONA_LOG_MAX_SIZE_MB",
+		"CONSONA_SSH_CONFIG", "CONSONA_SSH_AUTODETECT", "CONSONA_SSH_CONTROL", "CONSONA_REMOTE_CMD", "CONSONA_KEYRING_SERVICE"} {
 		if v := os.Getenv(k); v != "" {
-			if abs, err := filepath.Abs(v); err == nil {
-				v = abs
+			if strings.HasSuffix(k, "_DIR") || k == "CONSONA_SSH_CONFIG" {
+				if abs, err := filepath.Abs(v); err == nil {
+					v = abs
+				}
 			}
-			env = append(env, [2]string{"npm_config_userconfig", v})
-			break
+			env = append(env, [2]string{k, v})
+		}
+	}
+	// npm's user config and cache (the daemon runs npm for builds): a
+	// non-default cache stays the cache the CLI's npm uses.
+	for _, ks := range [][]string{{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"}, {"npm_config_cache", "NPM_CONFIG_CACHE"}} {
+		for _, k := range ks {
+			if v := os.Getenv(k); v != "" {
+				if abs, err := filepath.Abs(v); err == nil {
+					v = abs
+				}
+				env = append(env, [2]string{ks[0], v})
+				break
+			}
 		}
 	}
 	return env
@@ -106,8 +123,8 @@ func InstallAutostart(c Config) (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootout", c.launchdTarget())
-		err = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), path)
+		launchdBootout(c)
+		err = launchdBootstrap(c, path)
 	case "windows":
 		err = run("schtasks", "/Create", "/F", "/TN", c.serviceName(), "/XML", path)
 		if err == nil {
@@ -138,7 +155,7 @@ func RemoveAutostart(c Config) error {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootout", c.launchdTarget())
+		launchdBootout(c)
 	case "windows":
 		_ = run("schtasks", "/End", "/TN", c.serviceName())
 		_ = run("schtasks", "/Delete", "/F", "/TN", c.serviceName())
@@ -154,6 +171,35 @@ func RemoveAutostart(c Config) error {
 	return nil
 }
 
+// launchctl bootout returns before the service is gone, and a bootstrap that
+// races it fails ("Bootstrap failed: 5: Input/output error"), leaving the
+// service unloaded: the next kickstart then cannot find it. So bootout waits
+// until launchd has let go, and bootstrap retries until the label is loaded.
+func launchdBootout(c Config) {
+	_ = run("launchctl", "bootout", c.launchdTarget())
+	for i := 0; i < 50 && launchdLoaded(c); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func launchdLoaded(c Config) bool {
+	return exec.Command("launchctl", "print", c.launchdTarget()).Run() == nil
+}
+
+func launchdBootstrap(c Config, path string) error {
+	var err error
+	for i := 0; i < 30; i++ {
+		if launchdLoaded(c) {
+			return nil
+		}
+		if err = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), path); err == nil {
+			return nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return err
+}
+
 func (c Config) launchdTarget() string {
 	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + c.launchdLabel()
 }
@@ -161,7 +207,9 @@ func (c Config) launchdTarget() string {
 func serviceStart(c Config) error {
 	switch runtime.GOOS {
 	case "darwin":
-		_ = run("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.servicePath())
+		if err := launchdBootstrap(c, c.servicePath()); err != nil {
+			return err
+		}
 		return run("launchctl", "kickstart", c.launchdTarget())
 	case "windows":
 		return run("schtasks", "/Run", "/TN", c.serviceName())
@@ -172,7 +220,8 @@ func serviceStart(c Config) error {
 func serviceStop(c Config) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return run("launchctl", "bootout", c.launchdTarget()) // KeepAlive would restart a plain kill
+		launchdBootout(c) // KeepAlive would restart a plain kill
+		return nil
 	case "windows":
 		stopDirect(c) // the daemon exits cleanly, so the supervisor ends too
 		_ = run("schtasks", "/End", "/TN", c.serviceName())
@@ -210,6 +259,7 @@ func launchdPlist(c Config, exe string) string {
 <key>EnvironmentVariables</key><dict>%s</dict>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>1</integer>
 <key>StandardOutPath</key><string>%s</string>
 <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
