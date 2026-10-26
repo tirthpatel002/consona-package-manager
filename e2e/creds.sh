@@ -15,6 +15,8 @@
 # default gh login is never used.
 # macOS: scenario A uses the login Keychain (found through the real HOME) with
 # the test service; its consona config dir, home, npmrc and npm cache are temp.
+# E2E_NO_KEYCHAIN=1 (macOS): skip scenario A and every Keychain call, for
+# Macs where no test item may be added to the login Keychain.
 # Scenario A on Linux needs dbus-run-session, gnome-keyring-daemon and
 # secret-tool (KEYRING_ROOT=<extracted debs> works without installing).
 set -uo pipefail
@@ -128,7 +130,7 @@ KEEP=
 cleanup() {
   for h in "$TMP"/*-consona; do [ -d "$h" ] && CONSONA_HOME=$h CONSONA_PORT=$PORT "$BIN" daemon stop >/dev/null 2>&1; done
   rm -rf "$TMP"/a-home/.local/share/keyrings   # the throwaway keyring, even when keeping the rest
-  if [ "$OS" = Darwin ]; then   # only ever the test service's entry
+  if [ "$OS" = Darwin ] && [ -z "${E2E_NO_KEYCHAIN:-}" ]; then   # only ever the test service's entry
     while security delete-generic-password -s "$KSVC" -a rakesh >/dev/null 2>&1; do :; done
   fi
   [ -z "$KEEP" ] && rm -rf "$TMP"
@@ -176,7 +178,9 @@ finish() {   # stop the scenario's daemon and undo its npm setup
 }
 
 echo "== A: no gh installed, named token in the OS secure store"
-if [ "$OS" = Darwin ]; then
+if [ "$OS" = Darwin ] && [ -n "${E2E_NO_KEYCHAIN:-}" ]; then
+  echo "SKIP  A on macOS: E2E_NO_KEYCHAIN=1 (no login Keychain item is added)"
+elif [ "$OS" = Darwin ]; then
   bash "$0" __scenario_a > "$TMP/a.log" 2>&1   # login Keychain
 elif command -v dbus-run-session >/dev/null && { command -v gnome-keyring-daemon >/dev/null || [ -n "${KEYRING_ROOT:-}" ]; }; then
   KR=${KEYRING_ROOT:-}

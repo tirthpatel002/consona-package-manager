@@ -198,9 +198,14 @@ lane_resolve() {
   res "name-mismatch: install by repo name" INFO \
     "clear error or warning; never silently under the wrong name" \
     "rc=$rc; installed at node_modules/$M; its package.json name=$inst (repo's says @$OWNER/something-else); npm output mentions something-else: $(grep -ci 'something-else' "$L/nm1.out"); daemon log mentions it: $(grep -ci 'something-else' "$CONSONA_HOME/daemon.log"); log store mentions it: $("$BIN" logs export --format jsonl 2>/dev/null | grep -ci 'something-else')"
-  if [ "$inst" = "$M" ] && ! grep -qi 'something-else' "$L/nm1.out" "$CONSONA_HOME/daemon.log" && ! "$BIN" logs export --format jsonl 2>/dev/null | grep -qi 'something-else'; then
-    res "name-mismatch: warning shown" FAIL "a warning naming @$OWNER/something-else" "none: name rewritten to $M silently"
-  else res "name-mismatch: warning shown" PASS "a warning" "present"; fi
+  "$BIN" install "$M@^1.0.0" > "$L/nm1-consona.out" 2>&1
+  local nmd nms nmc
+  nmd=$(grep -c 'source.name_mismatch.*something-else' "$CONSONA_HOME/daemon.log")
+  nms=$("$BIN" logs export --format jsonl 2>/dev/null | grep '"event":"source.name_mismatch"' | grep -c "\"package\":\"$M\".*something-else")
+  nmc=$(grep -c '^consona: warning: .*something-else' "$L/nm1-consona.out")
+  res "name-mismatch: warning shown" "$( [ "$nmd" -ge 1 ] && [ "$nms" -ge 1 ] && [ "$nmc" -ge 1 ] && echo PASS || echo FAIL)" \
+    "a warning naming @$OWNER/something-else in daemon.log, the log store (source.name_mismatch) and the consona install summary" "daemon.log=$nmd log-store=$nms summary=$nmc"
+  res "name-mismatch: summary text" INFO "-" "$(grep -m1 '^consona: warning:' "$L/nm1-consona.out" | cut -c1-300)"
   expect "name-mismatch: require(repo name) works (fixture hello() is hard-coded)" "something-else@1.0.0" "$(hello "$M")"
   app nm2; npmi nm2 install "$O/something-else"; rc=$?
   ok "name-mismatch: manifest name @$OWNER/something-else" "not installable (no such repo): clear 404" bash -c "[ $rc -ne 0 ] && grep -q '404' '$L/nm2.out'"
@@ -224,8 +229,11 @@ lane_graph() {
   expect "cycle: partner() both ways" "consona-fx-cycle-b@1.0.0 consona-fx-cycle-a@1.0.0" "$(node -e "console.log(require('$CA').partner()+' '+require('$CB').partner())" 2>&1)"
   sleep 2; local c1; c1=$(cpu_window 10); echo "$c1" > "$L/cpu-after-cycle"
   res "cycle: daemon idle after install (10s window)" "$(awk -v c="$c1" 'BEGIN{print (c<2)?"PASS":"FAIL"}')" "< 2 CPU-s (no background re-resolve loop)" "${c1} CPU-s"
+  local n1; n1=$(grep -c 'source.resolve.*consona-fx-cycle-' "$CONSONA_HOME/daemon.log")
   sleep 35; local c2; c2=$(cpu_window 10); echo "$c2" > "$L/cpu-after-cycle-45s"
   res "cycle: daemon idle 45s later (10s window)" "$(awk -v c="$c2" 'BEGIN{print (c<2)?"PASS":"FAIL"}')" "< 2 CPU-s" "${c2} CPU-s"
+  local n2; n2=$(grep -c 'source.resolve.*consona-fx-cycle-' "$CONSONA_HOME/daemon.log")
+  expect "cycle: no background re-resolves after the install (source.resolve count over 45s)" "$n1 -> $n1" "$n1 -> $n2"
   res "cycle: background source.resolve events for cycle-a/b so far" INFO "a handful (one per install)" "$(grep -c 'source.resolve.*consona-fx-cycle-' "$CONSONA_HOME/daemon.log") events over ~$(secs "$t" "$(now)")s since the cycle install"
 
   local PE=$O/consona-fx-peer
@@ -276,6 +284,7 @@ lane_pkg() {
   local PB=$O/consona-fx-prepare-build
   app prep "{\"$PB\": \"^1.0.0\"}"; npmi prep install; rc=$?
   ok "prepare-build: install" "rc=0" test $rc -eq 0
+  expect "prepare-build: lockfile integrity on the first install" "sha512" "$(node -p 'String(require("./package-lock.json").packages["node_modules/'"$PB"'"].integrity||"MISSING").slice(0,6)' 2>&1)"
   expect "prepare-build: dist/BUILD_STAMP.txt (prepack ran)" prepack-ran "$(cat "node_modules/$PB/dist/BUILD_STAMP.txt" 2>&1)"
   expect "prepare-build: hello() from dist/index.js" prepare-build@1.0.0 "$(hello "$PB")"
   expect "prepare-build: tarball contents" "package/README.md package/dist/BUILD_STAMP.txt package/dist/index.js package/package.json" "$(tarlist "$PB")"
@@ -288,6 +297,7 @@ lane_pkg() {
   local msg; msg=$(grep -i 'build failed\|422' "$L/bf.out" | head -3 | tr '\n' ' ' | cut -c1-400)
   res "build-fails: npm error text" INFO "-" "$msg"
   ok "build-fails: names package@version" "error names $BF@1.0.0" grep -q "$BF@1.0.0" "$L/bf.out"
+  ok "build-fails: names the failing script" "npm error says the \"prepare\" script failed" grep -q "the package's \"prepare\" script failed" "$L/bf.out"
   if grep -q 'CONSONA_FX_BUILD_FAILS: deliberate prepare failure' "$L/bf.out"; then res "build-fails: script's stderr in npm error" PASS "includes CONSONA_FX_BUILD_FAILS: deliberate prepare failure" "included"
   else res "build-fails: script's stderr in npm error" FAIL "includes CONSONA_FX_BUILD_FAILS: deliberate prepare failure" "not included; only a path to build-failed.log"; fi
   local logf; logf=$(grep -o '/[^ "]*build-failed.log' "$L/bf.out" | head -1)
@@ -297,6 +307,7 @@ lane_pkg() {
   ok "build-fails: no crash stack" "no panic/goroutine in npm output or daemon log" bash -c "! grep -qi 'panic\|goroutine ' '$L/bf.out' '$CONSONA_HOME/daemon.log'"
   "$BIN" install > "$L/bf-consona.out" 2>&1; rc=$?
   ok "build-fails: consona install summary" "rc != 0 and a 'consona: build failed for $BF@1.0.0' line" bash -c "[ $rc -ne 0 ] && grep -q '^consona: build failed for $BF@1.0.0' '$L/bf-consona.out'"
+  ok "build-fails: consona install summary has the script's stderr" "includes CONSONA_FX_BUILD_FAILS: deliberate prepare failure" grep -q 'CONSONA_FX_BUILD_FAILS: deliberate prepare failure' "$L/bf-consona.out"
   res "build-fails: consona install text" INFO "-" "$(grep '^consona:' "$L/bf-consona.out" | head -2 | tr '\n' ' ' | cut -c1-400)"
   lane_finish "consona-fx-bin consona-fx-esm consona-fx-monorepo-root consona-fx-large-files consona-fx-npmignore consona-fx-prepare-build consona-fx-build-fails consona-fx-archived"
 }
@@ -310,8 +321,17 @@ lane_repo() {
   local RO=$O/consona-fx-renamed-old RN=$O/consona-fx-renamed-new
   app ren "{\"$RO\": \"^1.0.0\"}"; npmi ren install; rc=$?
   res "renamed: install via old name" "$( [ $rc -eq 0 ] && [ "$(ver "$RO")" = 1.0.0 ] && echo PASS || echo FAIL)" "follows GitHub's redirect: 1.0.0 installed as $RO" "rc=$rc; version=$(ver "$RO"); hello=$(hello "$RO"); $(grep -m1 -i 'err' "$L/ren.out" | cut -c1-160)"
+  "$BIN" install "$RO@^1.0.0" > "$L/ren-consona.out" 2>&1
+  local rd rs rc2
+  rd=$(grep -c "source.redirect.*consona-fx-renamed-old.*consona-fx-renamed-new" "$CONSONA_HOME/daemon.log")
+  rs=$("$BIN" logs export --format jsonl 2>/dev/null | grep '"event":"source.redirect"' | grep -c 'consona-fx-renamed-new')
+  rc2=$(grep -c '^consona: warning: .*consona-fx-renamed-old was renamed or transferred to github.com/[^ ]*consona-fx-renamed-new' "$L/ren-consona.out")
+  res "renamed: redirect warning (old name)" "$( [ "$rd" -ge 1 ] && [ "$rs" -ge 1 ] && [ "$rc2" -ge 1 ] && echo PASS || echo FAIL)" \
+    "warning naming the new repo in daemon.log, the log store (source.redirect) and the consona install summary" "daemon.log=$rd log-store=$rs summary=$rc2"
   app ren2 "{\"$RN\": \"^1.0.0\"}"; npmi ren2 install; rc=$?
   res "renamed: install via new name" INFO "record" "rc=$rc; version=$(ver "$RN"); package.json name=$(pjname "$RN") (repo manifest says $RO)"
+  ok "renamed: new name, manifest still says the old name -> name_mismatch warning" "source.name_mismatch for $RN in the log store" \
+    bash -c "'$BIN' logs export --format jsonl 2>/dev/null | grep '\"event\":\"source.name_mismatch\"' | grep -q '\"package\":\"$RN\"'"
 
   local TM=$O/consona-fx-tag-moved A=4082980268199cb692fbf7e90bb1f13acec7dd6f B=cd0cc0bf3dff906caaedf535051ef3585b5bdd64
   app tm "{\"$TM\": \"1.0.0\"}"; npmi tm install; rc=$?
@@ -367,7 +387,7 @@ lane_lock() {
   tc=$(find "$CONSONA_HOME" -path '*consona-fx-prepare-build*' -name '*.tgz' -exec $SHA256 {} + 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
   res "lock: prepare-build tarball deterministic (warm vs cold build)" "$( [ -n "$tw" ] && [ "$tw" = "$tc" ] && echo PASS || echo FAIL)" "same sha256" "warm=${tw:0:16} cold=${tc:0:16}"
   npmi reinstall install; rc=$?
-  res "lock: prepare-build integrity after a 2nd npm install" INFO "-" "rc=$rc integrity=$(node -p 'require("./package-lock.json").packages["node_modules/'"$PB"'"].integrity||"MISSING"' | cut -c1-24)"
+  expect "lock: prepare-build integrity after a 2nd npm install (unchanged)" "rc=0 $(node -p 'require(process.argv[1]).packages["node_modules/'"$PB"'"].integrity||"MISSING"' "$L/lock.orig.json" | cut -c1-24)" "rc=$rc $(node -p 'require("./package-lock.json").packages["node_modules/'"$PB"'"].integrity||"MISSING"' | cut -c1-24)"
   npmi audit-real audit --json; rc=$?
   local vul; vul=$(node -p 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));JSON.stringify(a.metadata&&a.metadata.vulnerabilities&&a.metadata.vulnerabilities.total)' "$L/audit-real.out" 2>/dev/null)
   res "audit: npm audit (registry.npmjs.org upstream)" "$( [ $rc -eq 0 ] && [ "$vul" = 0 ] && echo PASS || echo FAIL)" "rc=0, 0 vulnerabilities, private names withheld" "rc=$rc total=$vul; $("$BIN" logs --event audit --limit 5 2>/dev/null | grep -o 'forwarding [0-9]* public package names, withheld [0-9]* private' | tail -1)"
