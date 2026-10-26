@@ -26,6 +26,35 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// startPeer runs a child process (this test binary) that connects to a
+// listener and stays connected; it returns our end of the connection.
+func startPeer(t *testing.T) (net.Conn, *exec.Cmd, string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PROCINFO_LIVE_ADDR="+ln.Addr().String(), "PROCINFO_LIVE_MARK=peer-env-ok")
+	stdin, _ := cmd.StdinPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stdin.Close(); cmd.Wait() })
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	c.Read(make([]byte, 1))
+	want, _ := filepath.EvalSymlinks(dir)
+	return c, cmd, want
+}
+
 // The real backend finds a child process (same user) on the other end of
 // a loopback connection and reads its env, cwd and executable.
 func TestPeerLive(t *testing.T) {
@@ -35,34 +64,13 @@ func TestPeerLive(t *testing.T) {
 		}
 		t.Skip("no backend on this OS")
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	dir := t.TempDir()
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PROCINFO_LIVE_ADDR="+ln.Addr().String(), "PROCINFO_LIVE_MARK=peer-env-ok")
-	stdin, _ := cmd.StdinPipe()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { stdin.Close(); cmd.Wait() }()
-	ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
-	c, err := ln.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	c.Read(make([]byte, 1))
+	c, cmd, want := startPeer(t)
 	start := time.Now()
 	p, err := Peer(c.LocalAddr(), c.RemoteAddr())
 	took := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, _ := filepath.EvalSymlinks(dir)
 	got, _ := filepath.EvalSymlinks(p.Cwd)
 	if p.PID != cmd.Process.Pid || p.UID != os.Getuid() || p.Env["PROCINFO_LIVE_MARK"] != "peer-env-ok" || got != want || p.Exe == "" {
 		t.Fatalf("pid %d (want %d) uid %d env-mark %q cwd %q (want %q) cwdErr %v exe %q", p.PID, cmd.Process.Pid, p.UID,
