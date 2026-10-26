@@ -114,9 +114,13 @@ func (h *handler) checkName(ref core.Ref, name string, v *core.Version) {
 		return
 	}
 	if mn := manifestName(v); mn != "" && !strings.EqualFold(mn, name) {
+		where := h.e.Source.Describe(ref)
+		if i := strings.Index(where, " (also not in "); i > 0 { // chain: "github.com/o/r (also not in ...)"
+			where = where[:i]
+		}
 		msg := fmt.Sprintf("%s@%s: package.json in %s says its name is %q; consona serves it as %s (the name comes from the repo). "+
 			"Code that imports %q will not find it; rename the package or the repo so they match",
-			name, v.Version, h.e.Source.Describe(ref), mn, name, mn)
+			name, v.Version, where, mn, name, mn)
 		core.Warn("name|"+name+"|"+v.Revision.Commit, logstore.Entry{Event: logstore.EvSourceNameMismatch, Ecosystem: "npm", Package: name,
 			Owner: ref.Owner, Repo: ref.Name, Version: v.Version, CommitSHA: v.Revision.Commit, Result: "name-mismatch", Message: msg,
 			Fields: map[string]any{"requested": name, "manifest_name": mn}})
