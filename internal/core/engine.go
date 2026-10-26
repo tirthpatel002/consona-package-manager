@@ -200,6 +200,9 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 	var art *Artifact
 	started := time.Now()
 	ev := logstore.Entry{Ecosystem: b.Ecosystem(), Package: name, Owner: ref.Owner, Repo: ref.Name, Version: v.Version, CommitSHA: v.Revision.Commit}
+	if v.Revision.Tag != "" {
+		ev.Fields = map[string]any{"tag": v.Revision.Tag} // shown by consona why/report
+	}
 	prebuilt := false
 	var err error
 	if pb, ok := e.Source.(Prebuilt); ok {
