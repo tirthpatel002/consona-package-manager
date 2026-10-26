@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 )
 
 // ErrBuild marks a failed package build; the message names the package,
@@ -171,11 +173,27 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 		return nil, err
 	}
 	var art *Artifact
+	started := time.Now()
+	ev := logstore.Entry{Ecosystem: b.Ecosystem(), Package: name, Owner: ref.Owner, Repo: ref.Name, Version: v.Version, CommitSHA: v.Revision.Commit}
+	if v.Info != nil && v.Info.NeedsBuild {
+		st := ev
+		st.Event, st.Level, st.Message = logstore.EvBuildStart, "info", "building with the package's own build scripts"
+		logstore.Log(st)
+	}
 	err := e.withSource(ctx, ref, v.Revision.Commit, func(src string) error {
 		var err error
 		art, err = b.Build(ctx, src, BuildRequest{Name: name, Version: v.Version, Revision: v.Revision, OutDir: dir})
 		return err
 	})
+	ev.Event, ev.DurationMS, ev.Level, ev.Result = logstore.EvBuildFinish, time.Since(started).Milliseconds(), "info", "ok"
+	if err != nil {
+		ev.Level, ev.Result, ev.Message = "error", "fail", err.Error()
+	}
+	if v.Info != nil && v.Info.NeedsBuild || err != nil {
+		logstore.Log(ev)
+	} else {
+		logstore.LogQuiet(ev)
+	}
 	if err != nil {
 		what := fmt.Sprintf("for %s@%s (commit %.7s)", name, v.Version, v.Revision.Commit)
 		var be *BuildError
@@ -184,7 +202,7 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 			_ = os.WriteFile(logf, be.Output, 0o600)
 			return nil, fmt.Errorf("%w %s: %s failed; full output: %s", ErrBuild, what, be.Step, logf)
 		}
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrAccess) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w %s: %v", ErrBuild, what, err)

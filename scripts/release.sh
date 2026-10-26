@@ -15,5 +15,9 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; d
     -o "$OUT/consona_${VERSION}_${os}_${arch}${ext}" ./cmd/consona
 done
 cp install.sh "$OUT/install.sh"
-(cd "$OUT" && sha256sum consona_* install.sh > SHA256SUMS)
+# sha256sum (GNU coreutils) or shasum -a 256 (macOS); same output format.
+if command -v sha256sum >/dev/null 2>&1; then SHA256="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then SHA256="shasum -a 256"
+else echo "release.sh: need sha256sum or shasum" >&2; exit 1; fi
+(cd "$OUT" && $SHA256 consona_* install.sh > SHA256SUMS)
 ls -l "$OUT"

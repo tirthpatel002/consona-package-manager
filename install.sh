@@ -67,12 +67,15 @@ case ":$PATH:" in *":$DIR:"*) ;; *)
 esac
 echo
 echo "Next steps:"
-if ! command -v gh >/dev/null 2>&1; then
-  echo "  1. install the GitHub CLI (https://cli.github.com) and run: gh auth login"
-elif ! gh auth status >/dev/null 2>&1; then
-  echo "  1. log in to GitHub: gh auth login"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  echo "  1. GitHub credentials: ok (gh login)"
+elif [ -n "${CONSONA_TOKEN:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+  echo "  1. GitHub credentials: ok (token in the environment)"
 else
-  echo "  1. GitHub login: ok (gh)"
+  echo "  1. give consona one GitHub credential that can read your private repos, any of:"
+  echo "       consona token add <name> --default   (saved in the OS secure store)"
+  echo "       export CONSONA_TOKEN=...             (or GH_TOKEN)"
+  echo "       gh auth login                        (GitHub CLI, optional)"
 fi
 echo "  2. point npm at consona (once): consona setup"
 echo "  then use npm as usual; undo any time with: consona setup --undo"
