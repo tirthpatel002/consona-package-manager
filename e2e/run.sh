@@ -279,6 +279,8 @@ check "event log: GitHub resolutions recorded in the config dir's log store ($NG
   bash -c "[ $NGH -ge 4 ] && [ -d '$CONSONA_CONFIG_DIR/logs' ] && ! grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_' '$TMP/log-resolve.json'"
 [ -n "$TOKN" ] && check "event log: the daemon read GitHub with the named token e2e-fixture (credential_source)" \
   bash -c "'$BIN' logs --event credential.resolve --limit 100000 --json 2>/dev/null | grep -qF 'named token \\\"e2e-fixture'"
+[ -n "$TOKN" ] && check "event log: no gh login credential was ever used (gh is switched off)" \
+  bash -c "'$BIN' logs export --format jsonl 2>/dev/null > '$TMP/all-events.jsonl' && [ -s '$TMP/all-events.jsonl' ] && ! grep -qF '\"credential_source\":\"gh login' '$TMP/all-events.jsonl'"
 if [ -n "$TOKN" ]; then TOK=$TOKN; else TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token); fi
 [ ${#TOK} -ge 20 ] || fail "could not read gh token for leak check"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | wc -l); unset TOK   # pattern via a pipe, never a file

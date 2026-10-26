@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -80,5 +81,38 @@ func TestPeerLive(t *testing.T) {
 	// Our own end of the same connection is this process.
 	if _, err := Peer(c.RemoteAddr(), c.LocalAddr()); !errors.Is(err, ErrSelf) && !errors.Is(err, ErrNotFound) {
 		t.Fatalf("reverse lookup: %v", err)
+	}
+}
+
+// A node process that sets its title, as npm does, is read just as well:
+// the title overwrites its arguments, not its environment.
+func TestPeerLiveNodeTitle(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if sys == nil || err != nil {
+		t.Skip("no backend or no node")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	js := `process.title = "npm whoami"; const s = require("net").connect(+process.env.PROCINFO_PORT, "127.0.0.1", () => s.write("x")); process.stdin.on("end", () => process.exit(0)); process.stdin.resume()`
+	cmd := exec.Command(node, "-e", js)
+	cmd.Env = append(os.Environ(), "PROCINFO_PORT="+strconv.Itoa(ln.Addr().(*net.TCPAddr).Port), "PROCINFO_LIVE_MARK=node-env-ok")
+	stdin, _ := cmd.StdinPipe()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { stdin.Close(); cmd.Wait() }()
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+	c, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Read(make([]byte, 1))
+	p, err := Peer(c.LocalAddr(), c.RemoteAddr())
+	if err != nil || p.PID != cmd.Process.Pid || p.Env["PROCINFO_LIVE_MARK"] != "node-env-ok" {
+		t.Fatalf("node peer: %+v %v", p, err)
 	}
 }

@@ -152,6 +152,13 @@ func TestParseProcargs(t *testing.T) {
 	if err != nil || exe != "/opt/homebrew/bin/node" || len(env) != 2 || env["NPM_TOKEN"] != "a=b" || env["HOME"] != "/Users/u" {
 		t.Fatalf("%q %v %v", exe, env, err)
 	}
+	// node/npm set process.title: the title overwrites argv, the rest is zeroed.
+	b = make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, 3)
+	b = append(b, "/opt/homebrew/bin/node\x00\x00npm whoami\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00npm_config_userconfig=/u/rc\x00NPM_TOKEN=t\x00\x00"...)
+	if _, env, err := parseProcargs(b); err != nil || len(env) != 2 || env["npm_config_userconfig"] != "/u/rc" || env["NPM_TOKEN"] != "t" {
+		t.Fatalf("title-overwritten args: %v %v", env, err)
+	}
 	if _, _, err := parseProcargs([]byte{1}); err == nil {
 		t.Fatal("short buffer")
 	}

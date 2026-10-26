@@ -59,7 +59,7 @@ func peerClient(r *http.Request) (c *client, sameUser, found bool) {
 		return nil, true, false
 	}
 	c = &client{env: p.Env, cwd: p.Cwd, node: p.Exe}
-	fields := map[string]any{"pid": p.PID, "via": p.Via}
+	fields := map[string]any{"pid": p.PID, "via": p.Via, "env_vars": len(p.Env)} // a count, never a value
 	if p.CwdErr != nil {
 		logPeer("warn", "partial", took, fields,
 			fmt.Sprintf("%s request: working directory of npm (pid %d) unreadable (%v); its project .npmrc is not used", r.Method, p.PID, p.CwdErr))

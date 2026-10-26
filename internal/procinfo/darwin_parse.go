@@ -78,7 +78,8 @@ func parsePcblist(b []byte, cport, sport, selfPid, selfUID int) pcbPeer {
 func align8(n int) int { return (n + 7) &^ 7 }
 
 // parseProcargs reads a kern.procargs2 buffer: int32 argc, the exec path,
-// NUL padding, argc NUL-terminated arguments, then the environment
+// NUL padding, argc NUL-terminated arguments (or a process title over
+// them, NUL-padded), then the environment
 // (NUL-terminated strings up to an empty one; Apple's own strings follow).
 func parseProcargs(b []byte) (exe string, env map[string]string, err error) {
 	if len(b) < 4 {
@@ -111,6 +112,12 @@ func parseProcargs(b []byte) (exe string, env map[string]string, err error) {
 		if _, ok := next(); !ok {
 			return exe, nil, errors.New("kern.procargs2: truncated arguments")
 		}
+	}
+	// A process that set its title (node, and so npm, do through libuv)
+	// has written the title over its arguments and zeroed the rest of that
+	// area, so fewer arguments than argc are left: skip the NUL run.
+	for p < len(b) && b[p] == 0 {
+		p++
 	}
 	env = map[string]string{}
 	for {
