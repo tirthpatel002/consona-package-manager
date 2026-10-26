@@ -37,6 +37,7 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
   consona logs [filters] | export | prune | clear | info
                                        structured event log (see "consona logs help")
   consona why <@scope/pkg> | report    provenance of installed packages (see "consona why help")
+  consona cache list|prune             manage the local build cache (see "consona cache help")
   consona version                      print the version
 
 Every command prints what it is doing on stderr (npm config lines, credential used, daemon
@@ -63,7 +64,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 // the log store.
 var logsEvents = map[string]bool{"setup": true, "uninstall": true, "install": true, "i": true, "audit": true,
 	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true,
-	"remote-serve": true, "which": true, "check": true, "dev": true}
+	"remote-serve": true, "which": true, "check": true, "dev": true, "cache": true}
 
 func fail(format string, a ...any) int {
 	fmt.Fprintf(os.Stderr, "consona: "+format+"\n", a...)
@@ -185,6 +186,8 @@ func run(args []string) int {
 		return runLogs(cfg, args[1:])
 	case "why", "report":
 		return runWhy(cfg, args)
+	case "cache":
+		return runCache(cfg, args[1:])
 	case "install", "i", "audit":
 		if err := npm.CheckSetup(npmBase); err != nil {
 			return fail("%v", err)

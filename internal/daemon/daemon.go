@@ -74,6 +74,9 @@ func OpenLogs(c Config, echo bool) *logstore.Async {
 // Serve runs the daemon in the foreground until stopped.
 func Serve(c Config, src core.Source) error {
 	e := core.NewEngine(src, filepath.Join(c.Home, "cache"))
+	if rc, ok := src.(interface{ RemoteCache() core.RemoteCache }); ok {
+		e.RemoteCache = rc.RemoteCache()
+	}
 	ln, err := net.Listen("tcp", c.Addr())
 	if err != nil {
 		return err

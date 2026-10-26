@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
@@ -100,6 +101,49 @@ func (s *Server) handle(ctx context.Context, req Request, w io.Writer) {
 		sum := sha512.Sum512(data)
 		s.reply(w, Response{OK: true, Size: int64(len(data)), SHA512: base64.StdEncoding.EncodeToString(sum[:])})
 		w.Write(data)
+	case "cache_has":
+		_, art, tarballPath, err := s.resolveCacheEntry(req.Key)
+		if err != nil {
+			s.reply(w, Response{Error: err.Error(), NotFound: errors.Is(err, core.ErrNotFound)})
+			return
+		}
+		st, err := os.Stat(tarballPath)
+		if err != nil {
+			s.reply(w, Response{Error: err.Error(), NotFound: true})
+			return
+		}
+		s.reply(w, Response{OK: true, Size: st.Size(), SHA512: art.SHA512})
+	case "cache_fetch":
+		_, art, tarballPath, err := s.resolveCacheEntry(req.Key)
+		if err != nil {
+			s.reply(w, Response{Error: err.Error(), NotFound: errors.Is(err, core.ErrNotFound)})
+			return
+		}
+		data, err := os.ReadFile(tarballPath)
+		if err != nil {
+			s.reply(w, Response{Error: err.Error(), NotFound: true})
+			return
+		}
+		name := ""
+		if len(art.Manifest) > 0 {
+			var m struct {
+				Name string `json:"name"`
+			}
+			_ = json.Unmarshal(art.Manifest, &m)
+			name = m.Name
+		}
+		sum := sha512.Sum512(data)
+		p := &Package{
+			Name:     name,
+			Version:  art.Version,
+			File:     art.File,
+			Manifest: art.Manifest,
+			SHA1:     art.SHA1,
+			SHA512:   art.SHA512,
+			Size:     int64(len(data)),
+		}
+		s.reply(w, Response{OK: true, Package: p, Size: int64(len(data)), SHA512: base64.StdEncoding.EncodeToString(sum[:])})
+		w.Write(data)
 	default:
 		s.reply(w, Response{Error: fmt.Sprintf("unknown op %q", req.Op)})
 	}
@@ -173,4 +217,78 @@ func (s *Server) artifactPath(ctx context.Context, name, version string) (string
 		return "", err
 	}
 	return "", fmt.Errorf("%s@%s: %w (current is %s)", n, version, core.ErrNotFound, p.Version)
+}
+
+func (s *Server) resolveCacheEntry(key string) (string, *core.Artifact, string, error) {
+	if s.Engine == nil || s.Engine.CacheDir == "" {
+		return "", nil, "", fmt.Errorf("build cache unavailable: %w", core.ErrNotFound)
+	}
+	ecosystem, owner, repo, commit, versionOrFile, file, err := core.ValidateCacheKey(key)
+	if err != nil {
+		return "", nil, "", err
+	}
+	cacheDir := s.Engine.CacheDir
+	cleanCache := filepath.Clean(cacheDir)
+
+	var entryDir string
+	var expectedFile string
+	if file != "" {
+		entryDir = filepath.Join(cacheDir, ecosystem, owner, repo, commit, versionOrFile)
+		expectedFile = file
+	} else if strings.HasSuffix(versionOrFile, ".tgz") {
+		expectedFile = versionOrFile
+		commitDir := filepath.Join(cacheDir, ecosystem, owner, repo, commit)
+		entries, _ := os.ReadDir(commitDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				candidate := filepath.Join(commitDir, e.Name())
+				if _, err := os.Stat(filepath.Join(candidate, "artifact.json")); err == nil {
+					entryDir = candidate
+					break
+				}
+			}
+		}
+		if entryDir == "" {
+			return "", nil, "", fmt.Errorf("cache entry for %s: %w", key, core.ErrNotFound)
+		}
+	} else {
+		entryDir = filepath.Join(cacheDir, ecosystem, owner, repo, commit, versionOrFile)
+	}
+
+	cleanEntry := filepath.Clean(entryDir)
+	rel, err := filepath.Rel(cleanCache, cleanEntry)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return "", nil, "", fmt.Errorf("invalid path traversal: %w", core.ErrInvalidCacheKey)
+	}
+
+	artJSONPath := filepath.Join(cleanEntry, "artifact.json")
+	artBytes, err := os.ReadFile(artJSONPath)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("artifact metadata %s: %w", key, core.ErrNotFound)
+	}
+	var art core.Artifact
+	if err := json.Unmarshal(artBytes, &art); err != nil {
+		return "", nil, "", fmt.Errorf("invalid artifact metadata: %w", err)
+	}
+
+	tarballName := art.File
+	if expectedFile != "" && expectedFile != art.File {
+		tarballName = expectedFile
+	}
+	if tarballName == "" || strings.ContainsAny(tarballName, `/\`) || tarballName == "." || tarballName == ".." {
+		return "", nil, "", fmt.Errorf("invalid artifact file name: %w", core.ErrNotFound)
+	}
+
+	tarballPath := filepath.Join(cleanEntry, tarballName)
+	cleanTarball := filepath.Clean(tarballPath)
+	relTar, err := filepath.Rel(cleanCache, cleanTarball)
+	if err != nil || strings.HasPrefix(relTar, "..") || relTar == "." {
+		return "", nil, "", fmt.Errorf("invalid path traversal: %w", core.ErrInvalidCacheKey)
+	}
+
+	if _, err := os.Stat(cleanTarball); err != nil {
+		return "", nil, "", fmt.Errorf("artifact tarball missing: %w", core.ErrNotFound)
+	}
+
+	return cleanEntry, &art, cleanTarball, nil
 }
