@@ -11,11 +11,7 @@ Run `consona setup` once: local copies win over remote ones so nothing is duplic
 - **Credentials:** it uses whatever GitHub access you already have (per-owner or named tokens, `GH_TOKEN`/`GITHUB_TOKEN`, or the `gh` login) and never requires one specific kind.
 - **Trust and visibility:** builds run locally and are cached by commit, lockfiles get real integrity hashes, every command shows live verbose output (`--quiet` turns it off), and a structured log records everything without token values.
 - **Platforms:** macOS and Linux tested; the same commands and lockfiles on every OS.
-
-Use your private GitHub repos as npm packages, with no registry to run and
-nothing to change in the repos. `npm install @your-github-name/your-repo`
-just works for every repo your GitHub credentials can read. Everything else
-(public packages, publishing, `npm login`) keeps working exactly as before.
+- **Examples:** step-by-step scenarios for every command are in [docs/examples.md](docs/examples.md).
 
 ## Install
 
