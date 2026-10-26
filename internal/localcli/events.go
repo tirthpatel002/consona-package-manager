@@ -77,7 +77,11 @@ func logProbe(r sshremote.Remote, st sshremote.State) {
 		return
 	}
 	f["no_consona"] = st.NoConsona
-	e.Level, e.Result, e.Message = "warn", "fail", "remote "+r.Label()+": "+st.Err
+	msg := st.Err
+	if !strings.HasPrefix(msg, "remote "+r.Label()) { // sshremote errors usually name the remote already
+		msg = "remote " + r.Label() + ": " + msg
+	}
+	e.Level, e.Result, e.Message = "warn", "fail", msg
 	e.ErrorCode = "unreachable"
 	if st.NoConsona {
 		e.ErrorCode = "no-consona"

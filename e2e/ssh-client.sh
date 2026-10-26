@@ -77,7 +77,9 @@ check "unknown name: clear not-found, cached lists make the 2nd lookup fast" bas
 "$BIN" logs --event ssh.probe --errors --json > "$B/log-probe.json" 2>&1
 "$BIN" logs --event remote --json > "$B/log-remote.json" 2>&1
 check "logs: ssh resolutions recorded (source.resolve, fields.source=ssh)" grep -q '"source":"ssh"' "$B/log-resolve.json"
-check "logs: ssh probe failures recorded with ssh's reason (unreachable remote, remote without consona)" bash -c "grep -q '192.0.2.1' '$B/log-probe.json' && grep -q 'no-consona' '$B/log-probe.json'"
+# the remote without consona fails at `remote add` (remote.test); the lookup then reuses that state instead of probing again
+"$BIN" logs --event remote.test --errors --json > "$B/log-rtest.json" 2>&1
+check "logs: ssh failures recorded with ssh's reason (unreachable remote: ssh.probe; remote without consona: remote.test)" bash -c "grep -q '\"error_code\":\"unreachable\".*192.0.2.1' '$B/log-probe.json' && grep -q '\"error_code\":\"no-consona\"' '$B/log-rtest.json'"
 check "logs: not-found names list what was tried (source.fail)" bash -c "'$BIN' logs --event source.fail --json | grep -q 'e2euser/nope.*tried'"
 "$BIN" remote remove nocon >/dev/null; "$BIN" remote remove bad >/dev/null; "$BIN" remote remove vm > "$B/rm.out"; show "$B/rm.out"
 check "remote remove" bash -c "! '$BIN' remote list | grep -q '^vm '"
