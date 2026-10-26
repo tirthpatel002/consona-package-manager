@@ -57,7 +57,7 @@ func AutostartInstalled(c Config) bool {
 func (c Config) serviceEnv() [][2]string {
 	env := [][2]string{{"CONSONA_HOME", c.Home}, {"CONSONA_PORT", strconv.Itoa(c.Port)}, {"PATH", os.Getenv("PATH")}}
 	for _, k := range []string{"CONSONA_CONFIG_DIR", "GH_CONFIG_DIR", "CONSONA_LOG_DIR", "CONSONA_LOG_BACKEND", "CONSONA_LOG_MAX_AGE", "CONSONA_LOG_MAX_SIZE_MB",
-		"CONSONA_SSH_CONFIG", "CONSONA_SSH_AUTODETECT", "CONSONA_SSH_CONTROL", "CONSONA_REMOTE_CMD"} {
+		"CONSONA_SSH_CONFIG", "CONSONA_SSH_AUTODETECT", "CONSONA_SSH_CONTROL", "CONSONA_REMOTE_CMD", "CONSONA_KEYRING_SERVICE"} {
 		if v := os.Getenv(k); v != "" {
 			if strings.HasSuffix(k, "_DIR") || k == "CONSONA_SSH_CONFIG" {
 				if abs, err := filepath.Abs(v); err == nil {
@@ -67,13 +67,17 @@ func (c Config) serviceEnv() [][2]string {
 			env = append(env, [2]string{k, v})
 		}
 	}
-	for _, k := range []string{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"} {
-		if v := os.Getenv(k); v != "" {
-			if abs, err := filepath.Abs(v); err == nil {
-				v = abs
+	// npm's user config and cache (the daemon runs npm for builds): a
+	// non-default cache stays the cache the CLI's npm uses.
+	for _, ks := range [][]string{{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"}, {"npm_config_cache", "NPM_CONFIG_CACHE"}} {
+		for _, k := range ks {
+			if v := os.Getenv(k); v != "" {
+				if abs, err := filepath.Abs(v); err == nil {
+					v = abs
+				}
+				env = append(env, [2]string{ks[0], v})
+				break
 			}
-			env = append(env, [2]string{"npm_config_userconfig", v})
-			break
 		}
 	}
 	return env

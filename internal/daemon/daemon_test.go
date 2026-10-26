@@ -98,9 +98,14 @@ func TestLaunchdPlist(t *testing.T) {
 func TestServiceEnvPassesCredentialLocationsOnly(t *testing.T) {
 	t.Setenv("GH_CONFIG_DIR", "/home/u/.config/gh-work")
 	t.Setenv("CONSONA_CONFIG_DIR", "/home/u/.config/consona")
+	t.Setenv("CONSONA_KEYRING_SERVICE", "dev.consona.tokens.e2e-test")
+	t.Setenv("npm_config_cache", "/tmp/npm-cache")
 	t.Setenv("GH_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
 	t.Setenv("CONSONA_TOKEN", "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
 	u := systemdUnit(testConfig(t), "/usr/bin/consona")
+	if !strings.Contains(u, `Environment="CONSONA_KEYRING_SERVICE=dev.consona.tokens.e2e-test"`) || !strings.Contains(u, `Environment="npm_config_cache=/tmp/npm-cache"`) {
+		t.Fatalf("missing keyring service / npm cache:\n%s", u)
+	}
 	if !strings.Contains(u, `Environment="GH_CONFIG_DIR=/home/u/.config/gh-work"`) || !strings.Contains(u, `Environment="CONSONA_CONFIG_DIR=/home/u/.config/consona"`) {
 		t.Fatalf("missing config dirs:\n%s", u)
 	}

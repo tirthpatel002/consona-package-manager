@@ -20,6 +20,21 @@ export CONSONA_HOME=$TMP/consona-home CONSONA_PORT=${CONSONA_PORT:-48741}
 # ssh config are temp too: no local/ssh source or named token of this machine leaks in.
 export CONSONA_CONFIG_DIR=$TMP/cfg CONSONA_SSH_CONFIG=$TMP/ssh_config CONSONA_SSH_AUTODETECT=0
 : > "$CONSONA_SSH_CONFIG"
+# E2E_NAMED_TOKEN=1: the fixture credential comes from $OWNER_ENV in this
+# process env and is stored as a named token in a *test* secure-store service
+# (CONSONA_KEYRING_SERVICE, default dev.consona.tokens.e2e-test); the
+# auto-started daemon finds it via the config dir. gh is switched off (empty
+# GH_CONFIG_DIR), so no machine gh login can be used. For Macs where the
+# fixture login is one of several gh accounts in the Keychain.
+KSVC= TOKN=
+if [ -n "${E2E_NAMED_TOKEN:-}" ]; then
+  TOKN=${!OWNER_ENV:-}; unset "$OWNER_ENV" GH_TOKEN GITHUB_TOKEN CONSONA_TOKEN
+  [ ${#TOKN} -ge 20 ] || { echo "e2e: E2E_NAMED_TOKEN needs the fixture token in $OWNER_ENV"; rm -rf "$TMP"; exit 1; }
+  KSVC=${CONSONA_KEYRING_SERVICE:-dev.consona.tokens.e2e-test}
+  [ "$KSVC" = dev.consona.tokens ] && { echo "e2e: refusing the real secure-store service; pick a test CONSONA_KEYRING_SERVICE"; rm -rf "$TMP"; exit 1; }
+  export CONSONA_KEYRING_SERVICE=$KSVC
+  mkdir -p "$TMP/gh-empty"; export GH_CONFIG_DIR=$TMP/gh-empty
+fi
 export npm_config_userconfig=$TMP/npmrc npm_config_update_notifier=false npm_config_fund=false
 BIN=$TMP/bin/consona
 FAILS=0
@@ -64,7 +79,12 @@ fi
 export -f svc_active svc_enabled svc_restarts 2>/dev/null; export SVC UNIT LABEL OS
 PORT2=$((CONSONA_PORT+1)) FRESHPORT=$((CONSONA_PORT+2)) FPORT=$((CONSONA_PORT+8)) FAKE=; KEEP=
 in2() { CONSONA_PORT=$PORT2 CONSONA_HOME=$TMP/h2 npm_config_userconfig=$TMP/authrc "$@"; }   # 2nd instance, token-requiring upstream
-cleanup() {   # never leave a service, daemon or fake registry behind
+cleanup() {   # never leave a service, daemon, fake registry or test secret behind
+  if [ -n "$KSVC" ]; then
+    [ -x "$BIN" ] && "$BIN" token remove e2e-fixture >/dev/null 2>&1
+    if [ "$OS" = Darwin ]; then while security delete-generic-password -s "$KSVC" -a e2e-fixture >/dev/null 2>&1; do :; done
+    elif command -v secret-tool >/dev/null 2>&1; then secret-tool clear service "$KSVC" username e2e-fixture >/dev/null 2>&1; fi
+  fi
   [ -x "$BIN" ] && { "$BIN" setup --undo >/dev/null 2>&1; in2 "$BIN" daemon stop >/dev/null 2>&1; }
   [ -n "$FAKE" ] && kill "$FAKE" 2>/dev/null
   [ -n "${HTTP:-}" ] && kill "$HTTP" "${HTTP2:-}" 2>/dev/null
@@ -74,7 +94,7 @@ cleanup() {   # never leave a service, daemon or fake registry behind
 trap cleanup EXIT
 # Tests run as the fixture owner only (E2E_GH_CONFIG_DIR selects its gh login).
 if [ -z "${E2E_SKIP_LOGIN_CHECK:-}" ]; then
-  LOGIN=$(gh api user --jq .login 2>/dev/null)
+  if [ -n "$TOKN" ]; then LOGIN=$(GH_TOKEN=$TOKN gh api user --jq .login 2>/dev/null); else LOGIN=$(gh api user --jq .login 2>/dev/null); fi
   [ "$LOGIN" = "$OWNER" ] || { echo "e2e: the gh login is '$LOGIN', expected the fixture owner '$OWNER' (set E2E_GH_CONFIG_DIR)"; exit 1; }
   # The auto-started test daemon does not see this shell's env tokens: it
   # needs the gh config dir, or it would fall back to the machine's default gh login.
@@ -85,11 +105,17 @@ fi
 printf 'registry=https://registry.npmjs.org/\nfund=false\n' > "$TMP/npmrc"; cp "$TMP/npmrc" "$TMP/npmrc.orig"
 : > "$TMP/plain.npmrc"
 npmplain() { npm_config_userconfig=$TMP/plain.npmrc npm "$@"; }   # plain npm, no consona at all
+if [ -n "$TOKN" ]; then
+  printf '%s' "$TOKN" | "$BIN" token add e2e-fixture --for "@$OWNER" --description "run.sh fixture (test service $KSVC)" > "$TMP/token-add.out" 2>&1 \
+    || { sed 's/^/      | /' "$TMP/token-add.out"; echo "token add failed"; exit 1; }
+  check "fixture stored as a named token in the test service $KSVC" grep -q "$KSVC" <("$BIN" token list 2>&1)
+fi
 "$BIN" setup > "$TMP/setup.out" || { echo "consona setup failed"; exit 1; }
 if [ -n "${GH_CONFIG_DIR:-}" ]; then
   check "test unit gets the fixture gh login by location (GH_CONFIG_DIR), no token" bash -c "grep -qF '$GH_CONFIG_DIR' '$UNIT' && ! grep -qE 'TOKEN|gh[opsu]_|github_pat_' '$UNIT'"
 fi
 sed 's/^/      | /' "$TMP/setup.out"
+[ -n "$TOKN" ] && check "test unit gets the test keychain service name (CONSONA_KEYRING_SERVICE), no token" grep -qF "$KSVC" "$UNIT"
 check "setup points npm's registry at the daemon" test "$(npm config get registry)" = "http://127.0.0.1:$CONSONA_PORT/npm/"
 check "setup registered auto-start: $SVCKIND enabled + active + restarts" bash -c "svc_enabled && svc_active && svc_restarts"
 check "npmrc has no secret (only the placeholder login + fail-fast retry settings)" \
@@ -249,7 +275,9 @@ check "still 0 public bodies served by the daemon ($REDIR redirects)" test "$BOD
 NGH=$(grep '"source":"github"' "$TMP/log-resolve.json" | grep -o '"package":"[^"]*"' | sort -u | wc -l | tr -d ' ')
 check "event log: GitHub resolutions recorded in the config dir's log store ($NGH private packages, source=github)" \
   bash -c "[ $NGH -ge 4 ] && [ -d '$CONSONA_CONFIG_DIR/logs' ] && ! grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_' '$TMP/log-resolve.json'"
-TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token)
+[ -n "$TOKN" ] && check "event log: the daemon read GitHub with the named token e2e-fixture (credential_source)" \
+  bash -c "'$BIN' logs --json 2>/dev/null | grep -qF 'named token \\\"e2e-fixture'"
+if [ -n "$TOKN" ]; then TOK=$TOKN; else TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token); fi
 [ ${#TOK} -ge 20 ] || fail "could not read gh token for leak check"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | wc -l); unset TOK   # pattern via a pipe, never a file
 check "gh token in no written file (lockfile, npmrc, cache, logs, node_modules)" test "$LEAKS" -eq 0
@@ -341,7 +369,7 @@ check "undo removed the auto-start unit and stopped the service" bash -c "[ ! -e
 echo "== fresh machine: empty HOME, no npmrc, no npm cache, no gh config; credential only via $OWNER_ENV in this process"
 FH=$TMP/fresh-home; mkdir -p "$FH"
 RC_BEFORE=$(sha256 "$HOME/.npmrc" 2>/dev/null)
-TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token)
+if [ -n "$TOKN" ]; then TOK=$TOKN; else TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token); fi
 fresh() { env -i HOME="$FH" PATH="$PATH" USER="$USER" LANG=C.UTF-8 CONSONA_PORT=$FRESHPORT "$OWNER_ENV=$TOK" "$@"; }
 cp "$TMP/app/package.json" "$FH/pkg.json"; mkdir -p "$FH/app/src"; cp "$TMP/app/package.json" "$FH/app/"; cp "$TMP/app/src/App.tsx" "$FH/app/src/"
 (cd "$FH" && fresh "$BIN" setup --no-autostart > "$TMP/fresh-setup.out" 2>&1); rc=$?

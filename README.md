@@ -327,6 +327,11 @@ E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/run.sh
                   # token-requiring fake registry, a fresh HOME, release build
                   # + install.sh. Ports 48741-48749; the test unit gets only
                   # the gh config dir path, never a token.
+CONSONA_TOKEN_<OWNER>=... E2E_NAMED_TOKEN=1 e2e/run.sh
+                  # same, with gh switched off: the fixture token is stored as a
+                  # named token in a test secure-store service
+                  # (CONSONA_KEYRING_SERVICE, default dev.consona.tokens.e2e-test)
+                  # and removed afterwards; for a Mac with several gh accounts.
 E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/creds.sh
                   # credentials: no gh + named token in a throwaway Secret
                   # Service, CONSONA_TOKEN only, gh only, mixed fallthrough,
