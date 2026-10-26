@@ -50,27 +50,38 @@ Every lane also checks `consona logs` (JSONL export and the human view) has a
 Output: `results.tsv` (lane, case, PASS/FAIL/INFO, expected, actual), per-lane
 npm output, `logs.jsonl`, `daemon.log`, `timings.txt`. Exit code 1 if any FAIL.
 
-## Known failures (2026-10-26, consona 0.10.0 @ 559b488, VM linux/arm64 + macOS arm64)
+## Results
 
-119 PASS / 5 FAIL / 11 INFO, identical on both machines. The FAILs are product
-findings, not script errors:
+**With `fix/edge-bugs`** (2026-10-26, fix branch @ d4f8f86 + this branch,
+VM linux/arm64 + macOS arm64): **131 PASS / 0 FAIL / 11 INFO** on both machines.
+The 5 former FAILs below now pass, with stricter checks (see `e2e/edge.sh`).
 
-1. **cycle: daemon busy after install** — `internal/adapter/npm/warm.go`:
-   `warmRefs` → `Packages` → `warmDeps` → `warmRefs` recurses with a fresh
-   `seen` map per call, so a↔b warms forever (≈1–2 cores, re-fetching from
-   GitHub every memo TTL). Fix: share a visited set across one warm walk (or a
-   per-handler "warmed recently" map keyed by package).
-2. **lockfile: no integrity for a package that needs a build** —
-   `registry.go` `Packument` omits `dist.integrity` for unbuilt versions; npm
-   11 then writes no `integrity` for that entry (not even on a later install),
-   so it is never verified on reinstall. Fix: when the packument is requested,
-   wait (bounded) for the latest/prebuilt version's build and serve its hash,
-   or serve only built versions' hashes once known and invalidate npm's cache.
-3. **build failure: script stderr not shown** — `core` `BuildError` message
-   is "npm install --include=dev failed; full output: <path>". Fix: include
-   the last ~20 lines of the build output (prepare/prepack stderr) and name
-   the failing script.
-4. **name mismatch is silent** — `npmpack.Build` / `Packument` rewrite
-   `name` to the requested package with no warning. Fix: log a warning event
-   and print it in `consona install`/packument when the repo's manifest name
-   differs.
+**Before the fixes** (consona 0.10.0 @ 559b488): 119 PASS / 5 FAIL / 11 INFO,
+identical on both machines. The FAILs were product findings, now fixed:
+
+1. **cycle: daemon busy after install** — `warm.go` recursed with a fresh
+   `seen` map per call, so a↔b warmed forever. Fixed: one visited set per
+   warm walk plus a per-handler "warmed recently" TTL. Checks: daemon CPU
+   < 2 CPU-s per 10 s window right after and 45 s after the install, and no
+   new `source.resolve` events over 45 s.
+2. **lockfile: no integrity for a package that needs a build** — the
+   packument omitted `dist.integrity` for unbuilt versions. Fixed: the
+   packument waits (bounded, `CONSONA_BUILD_WAIT`, default 90s) for the
+   latest version's build. Checks: integrity on the first install, and
+   unchanged after a 2nd install.
+3. **build failure: script stderr not shown** — fixed: the error names the
+   failing script and has the last 20 lines of (sanitized) build output.
+   Checks: npm error says `the package's "prepare" script failed`, and both
+   npm and the `consona install` summary carry the script's stderr.
+4. **name mismatch is silent** (and repo renames) — fixed: a warning in the
+   daemon log, the log store (`source.name_mismatch` / `source.redirect`) and
+   the `consona install` summary. Checks: all three for name-mismatch and
+   for the renamed repo (old name); `source.name_mismatch` for the new name.
+
+Still INFO (by design): tag-moved shows npm's own EINTEGRITY (the daemon
+warns with `source.tag_moved` only when it built that version from another
+commit itself, which this suite does not do), and the other recorded
+behaviours.
+
+`creds.sh`: `E2E_NO_KEYCHAIN=1` skips scenario A and every Keychain call on
+macOS (for Macs where no test item may be added to the login Keychain).
