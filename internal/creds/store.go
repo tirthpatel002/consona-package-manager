@@ -64,15 +64,24 @@ func (e *NoStoreError) Unwrap() error { return e.Err }
 type SystemStore struct{}
 
 func (SystemStore) Get(name string) (string, error) {
+	if err := storeUsable(); err != nil {
+		return "", &NoStoreError{Err: err}
+	}
 	v, err := keyring.Get(Service, name)
 	return v, storeErr(err)
 }
 
 func (SystemStore) Set(name, secret string) error {
+	if err := storeUsable(); err != nil {
+		return &NoStoreError{Err: err}
+	}
 	return storeErr(keyring.Set(Service, name, secret))
 }
 
 func (SystemStore) Delete(name string) error {
+	if err := storeUsable(); err != nil {
+		return &NoStoreError{Err: err}
+	}
 	return storeErr(keyring.Delete(Service, name))
 }
 

@@ -135,6 +135,11 @@ Where things are kept:
   (GNOME Keyring, KWallet, KeePassXC). The daemon reads them when a request
   needs them and keeps them in memory only (re-read at most once a minute,
   so `token add/remove` take effect without a restart).
+  On macOS consona uses the login keychain only when HOME is your real home;
+  with any other HOME it fails with a clear error instead of making macOS
+  show a "Keychain Not Found" dialog. An explicit `GH_CONFIG_DIR` without a
+  github.com login in its `hosts.yml` means "no gh login" (newer gh on macOS
+  would otherwise answer from the keychain's default login).
 - **The index** (names, owners, description, login, type, expiry, dates;
   never values) in `tokens.json` in consona's config dir, written
   atomically, file `0600`, dir `0700`: `~/.config/consona` (Linux),
@@ -330,7 +335,7 @@ E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/run.sh
 CONSONA_TOKEN_<OWNER>=... E2E_NAMED_TOKEN=1 e2e/run.sh
                   # same, with gh switched off: the fixture token is stored as a
                   # named token in a test secure-store service
-                  # (CONSONA_KEYRING_SERVICE, default dev.consona.tokens.e2e-test)
+                  # (CONSONA_KEYRING_SERVICE, default a unique dev.consona.tokens.e2e-<pid>-<rand>)
                   # and removed afterwards; for a Mac with several gh accounts.
 E2E_GH_CONFIG_DIR=~/.config/gh-fixture e2e/creds.sh
                   # credentials: no gh + named token in a throwaway Secret

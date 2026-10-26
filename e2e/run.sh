@@ -22,7 +22,7 @@ export CONSONA_CONFIG_DIR=$TMP/cfg CONSONA_SSH_CONFIG=$TMP/ssh_config CONSONA_SS
 : > "$CONSONA_SSH_CONFIG"
 # E2E_NAMED_TOKEN=1: the fixture credential comes from $OWNER_ENV in this
 # process env and is stored as a named token in a *test* secure-store service
-# (CONSONA_KEYRING_SERVICE, default dev.consona.tokens.e2e-test); the
+# (CONSONA_KEYRING_SERVICE, default a unique dev.consona.tokens.e2e-<pid>-<rand>); the
 # auto-started daemon finds it via the config dir. gh is switched off (empty
 # GH_CONFIG_DIR), so no machine gh login can be used. For Macs where the
 # fixture login is one of several gh accounts in the Keychain.
@@ -30,7 +30,7 @@ KSVC= TOKN=
 if [ -n "${E2E_NAMED_TOKEN:-}" ]; then
   TOKN=${!OWNER_ENV:-}; unset "$OWNER_ENV" GH_TOKEN GITHUB_TOKEN CONSONA_TOKEN
   [ ${#TOKN} -ge 20 ] || { echo "e2e: E2E_NAMED_TOKEN needs the fixture token in $OWNER_ENV"; rm -rf "$TMP"; exit 1; }
-  KSVC=${CONSONA_KEYRING_SERVICE:-dev.consona.tokens.e2e-test}
+  KSVC=${CONSONA_KEYRING_SERVICE:-dev.consona.tokens.e2e-$$-$RANDOM}
   [ "$KSVC" = dev.consona.tokens ] && { echo "e2e: refusing the real secure-store service; pick a test CONSONA_KEYRING_SERVICE"; rm -rf "$TMP"; exit 1; }
   export CONSONA_KEYRING_SERVICE=$KSVC
   mkdir -p "$TMP/gh-empty"; export GH_CONFIG_DIR=$TMP/gh-empty

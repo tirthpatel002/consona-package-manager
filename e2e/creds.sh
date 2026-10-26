@@ -28,7 +28,7 @@ OS=$(uname -s)
 # Keychain, so a clearly named test service is used and removed afterwards;
 # on Linux the keyring itself is a throwaway one.
 KSVC=${CONSONA_KEYRING_SERVICE:-dev.consona.tokens}
-[ "$OS" = Darwin ] && [ -z "${CONSONA_KEYRING_SERVICE:-}" ] && KSVC=dev.consona.tokens.e2e-test
+[ "$OS" = Darwin ] && [ -z "${CONSONA_KEYRING_SERVICE:-}" ] && KSVC=dev.consona.tokens.e2e-$$-$RANDOM   # unique per run
 [ "$OS" = Darwin ] && [ "$KSVC" = dev.consona.tokens ] && { echo "creds e2e: refusing to use the real Keychain service on macOS; pick a test CONSONA_KEYRING_SERVICE"; exit 1; }
 FAILS=0 PASSES=0
 pass() { printf 'PASS  %s\n' "$*"; PASSES=$((PASSES+1)); }
@@ -236,10 +236,17 @@ check "E: daemon.log has the same detailed message" grep -q '401 bad credentials
 finish e "$NOGH" CONSONA_TOKEN="$GARBAGE"
 
 echo "== F: no secure store: token add fails clearly, nothing written"
+if [ "$OS" = Darwin ]; then
+  # A temp HOME has no login keychain; consona now refuses before calling
+  # security (unit test TestSystemStoreTempHomeNoSecurityCall), but never
+  # risk a "Keychain Not Found" dialog on a real Mac from an e2e run.
+  echo "SKIP  F on macOS: covered by unit tests (no Keychain call with a temp HOME)"
+else
 printf '%s' "$GARBAGE" | run_in f "$NOGH" -- "$BIN" token add x --no-verify > "$TMP/f-add.out" 2>&1; rc=$?
 show "$TMP/f-add.out"
 check "F: token add without a Secret Service fails (rc=$rc) pointing at env vars" bash -c "[ $rc -ne 0 ] && grep -q 'CONSONA_TOKEN' '$TMP/f-add.out' && grep -qi 'plaintext' '$TMP/f-add.out'"
 check "F: no index file and no token anywhere under its HOME" bash -c "[ ! -e '$TMP/f-home/.config/consona/tokens.json' ] && [ ! -e '$TMP/f-home/Library/Application Support/consona/tokens.json' ] && ! grep -rqF -- '$GARBAGE' '$TMP/f-home'"
+fi
 
 echo "== leaks: the real token is in no file written by any scenario"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | grep -v "^$TMP/bin/" | wc -l)
