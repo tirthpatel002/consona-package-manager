@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,6 +156,9 @@ func TestDev_NoTargetProjectsFound(t *testing.T) {
 }
 
 func TestDev_Once_SyncCorrectness(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
 	cfgDir, _ := setupTestEnvironment(t)
 	sayBuf := captureSay(t, false)
 
@@ -190,6 +194,9 @@ func TestDev_Once_SyncCorrectness(t *testing.T) {
 }
 
 func TestDev_Once_QuietMode(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
 	cfgDir, _ := setupTestEnvironment(t)
 	sayBuf := captureSay(t, true)
 
@@ -214,8 +221,11 @@ func TestDev_Once_QuietMode(t *testing.T) {
 }
 
 func TestDev_Once_SymlinkRefused(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
 	cfgDir, _ := setupTestEnvironment(t)
-	sayBuf := captureSay(t, false)
+	_ = captureSay(t, false)
 
 	idx := &localindex.Store{Dir: cfgDir}
 	pkgDir := t.TempDir()
@@ -231,19 +241,80 @@ func TestDev_Once_SymlinkRefused(t *testing.T) {
 	otherDir := t.TempDir()
 	_ = os.Symlink(otherDir, targetDir)
 
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
 	code := run([]string{"dev", "@test/symrefuse", "--project", projDir, "--once"})
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	var errBuf bytes.Buffer
+	_, _ = io.Copy(&errBuf, r)
+	errOut := errBuf.String()
+
 	// Should fail/exit 1 because the only target project was refused
 	if code != 1 {
 		t.Fatalf("expected exit code 1 when all target projects are refused, got %d", code)
 	}
 
-	sayOutput := sayBuf.String()
-	if !strings.Contains(sayOutput, "is a symlink pointing to") {
-		t.Fatalf("expected symlink refusal message in say output, got: %s", sayOutput)
+	if !strings.Contains(errOut, "is a symlink pointing to") {
+		t.Fatalf("expected symlink refusal message on stderr, got: %s", errOut)
+	}
+}
+
+func TestDev_Once_QuietMode_ErrorsStillVisible(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
+	cfgDir, _ := setupTestEnvironment(t)
+	sayBuf := captureSay(t, true)
+
+	idx := &localindex.Store{Dir: cfgDir}
+	pkgDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@test/symrefuse-quiet","version":"1.0.0"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(`1`), 0o644)
+	if _, err := idx.Add(localindex.Entry{Name: "@test/symrefuse-quiet", Path: pkgDir, DeviceID: "dev1"}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	projDir := t.TempDir()
+	targetDir := filepath.Join(projDir, "node_modules", "@test", "symrefuse-quiet")
+	_ = os.MkdirAll(filepath.Dir(targetDir), 0o755)
+	otherDir := t.TempDir()
+	_ = os.Symlink(otherDir, targetDir)
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	code := run([]string{"dev", "@test/symrefuse-quiet", "--project", projDir, "--once", "--quiet"})
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	var errBuf bytes.Buffer
+	_, _ = io.Copy(&errBuf, r)
+	errOut := errBuf.String()
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1 when all target projects are refused, got %d", code)
+	}
+
+	// In quiet mode, sayBuf should have 0 bytes (no progress lines)
+	if sayBuf.Len() != 0 {
+		t.Fatalf("expected empty say output in quiet mode, got: %s", sayBuf.String())
+	}
+
+	// But stderr must still contain the error!
+	if !strings.Contains(errOut, "is a symlink pointing to") {
+		t.Fatalf("expected symlink refusal error on stderr even in quiet mode, got: %s", errOut)
 	}
 }
 
 func TestDev_AutomaticTargetResolutionFromTracked(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
 	cfgDir, homeDir := setupTestEnvironment(t)
 	sayBuf := captureSay(t, false)
 

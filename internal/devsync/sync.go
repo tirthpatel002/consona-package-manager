@@ -46,9 +46,13 @@ func readManifest(dir string) (*manifest, error) {
 }
 
 // BuildAndPack builds and packs srcDir into outDir.
-// If package.json has prepare/prepack scripts, it runs the build via npmpack.Builder.
-// If no build scripts are present and npm is unavailable, it falls back to a pure Go tarball packer.
+// If npm is not on PATH, it fails with a clear error.
+// If package.json has prepare or prepack scripts, npmpack runs the build lifecycle.
 func BuildAndPack(ctx context.Context, srcDir, pkgName, outDir string) (string, error) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return "", fmt.Errorf("npm is required for dev sync: npm not found on PATH: %w", err)
+	}
+
 	m, err := readManifest(srcDir)
 	if err != nil {
 		return "", err
@@ -64,55 +68,19 @@ func BuildAndPack(ctx context.Context, srcDir, pkgName, outDir string) (string, 
 		return "", fmt.Errorf("copying source: %w", err)
 	}
 
-	hasScripts := m.Scripts["prepare"] != "" || m.Scripts["prepack"] != ""
-	hasNPM := false
-	if _, err := exec.LookPath("npm"); err == nil {
-		hasNPM = true
-	}
-
-	if hasScripts && !hasNPM {
-		return "", fmt.Errorf("npm is required to build %s with prepare/prepack scripts", pkgName)
-	}
-
 	startBuild := time.Now()
-	if hasScripts || hasNPM {
-		b := npmpack.Builder{}
-		art, err := b.Build(ctx, tmpBuildDir, core.BuildRequest{Name: pkgName, Version: m.Version, OutDir: outDir})
-		dur := time.Since(startBuild).Milliseconds()
-		if err != nil {
-			logstore.Log(logstore.Entry{
-				Event:      logstore.EvDevBuild,
-				Level:      "error",
-				Ecosystem:  "npm",
-				Package:    pkgName,
-				Result:     "fail",
-				DurationMS: dur,
-				Message:    err.Error(),
-			})
-			return "", err
-		}
+	b := npmpack.Builder{}
+	art, err := b.Build(ctx, tmpBuildDir, core.BuildRequest{Name: pkgName, Version: m.Version, OutDir: outDir})
+	dur := time.Since(startBuild).Milliseconds()
+	if err != nil {
 		logstore.Log(logstore.Entry{
 			Event:      logstore.EvDevBuild,
-			Level:      "info",
+			Level:      "error",
 			Ecosystem:  "npm",
 			Package:    pkgName,
-			Result:     "ok",
+			Result:     "fail",
 			DurationMS: dur,
-		})
-		return filepath.Join(outDir, art.File), nil
-	}
-
-	// Pure Go packing fallback (when no build scripts and no npm on PATH)
-	tarFile := npmpack.FileName(pkgName, m.Version)
-	tarPath := filepath.Join(outDir, tarFile)
-	if err := packPureGo(tmpBuildDir, tarPath); err != nil {
-		logstore.Log(logstore.Entry{
-			Event:     logstore.EvDevBuild,
-			Level:     "error",
-			Ecosystem: "npm",
-			Package:   pkgName,
-			Result:    "fail",
-			Message:   err.Error(),
+			Message:    err.Error(),
 		})
 		return "", err
 	}
@@ -122,63 +90,9 @@ func BuildAndPack(ctx context.Context, srcDir, pkgName, outDir string) (string, 
 		Ecosystem:  "npm",
 		Package:    pkgName,
 		Result:     "ok",
-		DurationMS: time.Since(startBuild).Milliseconds(),
+		DurationMS: dur,
 	})
-	return tarPath, nil
-}
-
-func packPureGo(srcDir, tarballPath string) error {
-	f, err := os.Create(tarballPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	gw := gzip.NewWriter(f)
-	defer gw.Close()
-
-	tw := tar.NewWriter(gw)
-	defer tw.Close()
-
-	return filepath.Walk(srcDir, func(p string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		hdrName := "package/" + filepath.ToSlash(rel)
-		if fi.IsDir() {
-			hdr := &tar.Header{
-				Name:     hdrName + "/",
-				Mode:     0o755,
-				Typeflag: tar.TypeDir,
-				ModTime:  fi.ModTime(),
-			}
-			return tw.WriteHeader(hdr)
-		}
-		hdr := &tar.Header{
-			Name:     hdrName,
-			Mode:     int64(fi.Mode().Perm()),
-			Size:     fi.Size(),
-			Typeflag: tar.TypeReg,
-			ModTime:  fi.ModTime(),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		in, err := os.Open(p)
-		if err != nil {
-			return err
-		}
-		defer in.Close()
-		_, err = io.Copy(tw, in)
-		return err
-	})
+	return filepath.Join(outDir, art.File), nil
 }
 
 // SyncResult holds the counts and elapsed time of a sync operation.
@@ -246,20 +160,45 @@ func SyncTarballToProject(tarballPath, pkgName, projectDir string) (SyncResult, 
 	res.TotalFiles = totalFiles
 	res.ChangedFiles = changedFiles
 
+	// Preserve nested node_modules: if <target>/node_modules exists and is a real dir
+	// (not a symlink), move it into tmpDir before the swap so it survives.
+	var preservedNM string
+	targetNM := filepath.Join(targetDir, "node_modules")
+	if fi, err := os.Lstat(targetNM); err == nil {
+		if fi.IsDir() && (fi.Mode()&os.ModeSymlink == 0) {
+			preservedNM = targetNM
+		}
+	}
+	if preservedNM != "" {
+		destNM := filepath.Join(tmpDir, "node_modules")
+		if err := os.Rename(preservedNM, destNM); err != nil {
+			return res, fmt.Errorf("preserving nested node_modules: %w", err)
+		}
+	}
+
 	// Atomic swap:
 	// If targetDir exists: rename targetDir -> oldTemp, rename tmpDir -> targetDir, remove oldTemp
 	if _, err := os.Stat(targetDir); err == nil {
 		oldTemp, err := os.MkdirTemp(parentDir, ".tmp-dev-old-*")
 		if err != nil {
+			if preservedNM != "" {
+				_ = os.Rename(filepath.Join(tmpDir, "node_modules"), targetNM)
+			}
 			return res, fmt.Errorf("creating old temp dir: %w", err)
 		}
 		_ = os.Remove(oldTemp) // free up path for rename
 		if err := os.Rename(targetDir, oldTemp); err != nil {
+			if preservedNM != "" {
+				_ = os.Rename(filepath.Join(tmpDir, "node_modules"), targetNM)
+			}
 			return res, fmt.Errorf("renaming existing target dir: %w", err)
 		}
 		if err := os.Rename(tmpDir, targetDir); err != nil {
 			// Try to restore old
 			_ = os.Rename(oldTemp, targetDir)
+			if preservedNM != "" {
+				_ = os.Rename(filepath.Join(tmpDir, "node_modules"), targetNM)
+			}
 			return res, fmt.Errorf("renaming new target dir: %w", err)
 		}
 		_ = os.RemoveAll(oldTemp)
@@ -341,6 +280,11 @@ func extractTarballSafe(tarballPath, destDir string) error {
 		cleanRel := filepath.Clean(filepath.FromSlash(name))
 		if cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("malicious tar entry: path traversal %q", hdr.Name)
+		}
+
+		// Never sync tarball content named node_modules
+		if isOrUnderNodeModules(cleanRel) {
+			continue
 		}
 
 		targetPath := filepath.Join(destDirClean, cleanRel)
@@ -450,12 +394,27 @@ func checkNoSymlinkAncestors(root, p string) error {
 	return nil
 }
 
+func isOrUnderNodeModules(rel string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if part == "node_modules" {
+			return true
+		}
+	}
+	return false
+}
+
 func countChanges(newDir, oldDir string) (totalFiles int, changedFiles int) {
 	newFiles := make(map[string]int64)
 	newContents := make(map[string][]byte)
 
 	_ = filepath.Walk(newDir, func(p string, fi os.FileInfo, err error) error {
-		if err != nil || fi.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if fi.IsDir() {
+			if fi.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(newDir, p)
@@ -476,7 +435,13 @@ func countChanges(newDir, oldDir string) (totalFiles int, changedFiles int) {
 
 	oldFiles := make(map[string]int64)
 	_ = filepath.Walk(oldDir, func(p string, fi os.FileInfo, err error) error {
-		if err != nil || fi.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if fi.IsDir() {
+			if fi.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(oldDir, p)

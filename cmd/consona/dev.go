@@ -127,14 +127,14 @@ func cmdDev(args []string) int {
 	syncOnce := func() bool {
 		tmpOut, err := os.MkdirTemp("", "consona-dev-tar-*")
 		if err != nil {
-			say("dev: failed to create temporary build directory: %v", err)
+			fmt.Fprintf(os.Stderr, "consona: dev: failed to create temporary build directory: %v\n", err)
 			return false
 		}
 		defer os.RemoveAll(tmpOut)
 
 		tarPath, err := devsync.BuildAndPack(context.Background(), entry.Path, entry.Name, tmpOut)
 		if err != nil {
-			say("dev: build failed for %s: %v", entry.Name, err)
+			fmt.Fprintf(os.Stderr, "consona: dev: build failed for %s: %v\n", entry.Name, err)
 			return false
 		}
 
@@ -143,7 +143,7 @@ func cmdDev(args []string) int {
 			res, err := devsync.SyncTarballToProject(tarPath, entry.Name, target)
 			if err != nil {
 				allOK = false
-				say("dev: skipping %s: %v", target, err)
+				fmt.Fprintf(os.Stderr, "consona: dev: skipping %s: %v\n", target, err)
 				continue
 			}
 			say("dev: synced %s (%d files, %d changed) -> %s in %dms",
