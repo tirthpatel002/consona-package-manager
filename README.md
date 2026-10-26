@@ -269,11 +269,17 @@ removed, and a login you made while consona was set up is kept.
   packages, a company mirror) is passed on with your existing login for
   your previous registry, found the way npm finds it: `npm_config_*`
   environment variables, the project `.npmrc`, your `~/.npmrc` and npm's
-  global npmrc, including `${NPM_TOKEN}`-style references. consona never
-  copies or logs your token; your npmrc only gets a placeholder value.
-  Two-factor one-time passwords (`--otp` or the prompt) pass straight
-  through. Only your own programs get your login: requests from other
-  users on the same machine never do (Linux).
+  global npmrc, including `${NPM_TOKEN}`-style references. On Linux and
+  macOS these come from the npm process that made the request (its
+  environment and its project directory, found from the connection; only
+  your own processes are read, and only for requests that need a login);
+  if that process cannot be read, and on Windows, consona uses your
+  `~/.npmrc`, the global npmrc and its own environment, and notes why in
+  `consona logs --event peer.lookup`. consona never copies or logs your
+  token; your npmrc only gets a placeholder value. Two-factor one-time
+  passwords (`--otp` or the prompt) pass straight through. Only your own
+  programs get your login: requests from other users on the same machine
+  never do (Linux, macOS).
 - **If the service is not running**, npm stops within a few seconds with
   `ECONNREFUSED 127.0.0.1:48731`; it never falls back to sending private
   names to the public registry. `consona daemon start` starts it.
