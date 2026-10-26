@@ -17,6 +17,7 @@ import (
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/devsync"
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"github.com/tirthpatel002/consona-package-manager/internal/lookalike"
 )
@@ -244,6 +245,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p := h.e.FindCached(h.b, ref, file); p != "" { // e.g. remote offline: a built tarball is still good
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, p)
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		h.fail(w, ref, name, err)
@@ -266,6 +268,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, bl.Path)
 			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 				Repo: ref.Name, Version: p.Version, CommitSHA: p.Revision.Commit, Result: "ok", DurationMS: time.Since(start).Milliseconds()})
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		// A version the source no longer lists (a local folder changed
@@ -273,6 +276,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p := h.e.FindCached(h.b, ref, file); p != "" {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, p)
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
@@ -443,4 +447,24 @@ func (h *handler) checkLookalike(r *http.Request, w http.ResponseWriter, ref cor
 		return true
 	}
 	return false
+}
+
+func (h *handler) trackDevProject(r *http.Request, name string, ref core.Ref) {
+	if !h.e.Live(ref) {
+		return
+	}
+	c, same := clientFor(r)
+	if !same || c == nil {
+		return
+	}
+	projectDir := ""
+	if p := c.getenv("npm_config_local_prefix"); p != "" {
+		projectDir = p
+	} else {
+		projectDir = c.cwd
+	}
+	if projectDir == "" {
+		return
+	}
+	_ = devsync.TrackProject(core.Home(), name, projectDir)
 }
