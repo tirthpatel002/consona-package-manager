@@ -207,7 +207,8 @@ check "lockfile: $PRIV private via consona, $PUB public via registry.npmjs.org, 
 check "npm's own install summary (audit ran during install)" grep -qE "added [0-9]+ packages, and audited [0-9]+ packages in" "$TMP/install.out"
 
 LOG=$CONSONA_HOME/daemon.log
-pubstats() { awk -v o="/npm/@$OWNER/" '$3=="GET"||$3=="HEAD"{ if (index($4,o)==1) next; if ($5=="302") r++; else b++ } END{printf "%d %d", r, b}' "$LOG"; }
+pubstats() { awk -v o="/npm/@$OWNER/" '$3=="GET"||$3=="HEAD"{ if (index($4,o)==1 || index($4,"/npm/")!=1) next; if ($5=="302") r++; else b++ } END{printf "%d %d", r, b}' "$LOG"; }
+# (only /npm/ requests count: /-/consona/resolutions is the CLI asking where packages came from)
 read -r REDIR BODIES < <(pubstats)
 check "daemon served 0 public package bodies ($REDIR public requests answered by 302 redirect)" test "$BODIES" -eq 0 -a "$REDIR" -gt 0
 

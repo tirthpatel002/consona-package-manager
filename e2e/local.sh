@@ -147,9 +147,11 @@ grep -h '"source":"' "$T/log-resolve.json" | sed 's/.*"package":"\([^"]*\)".*"so
 check "logs record local and github resolutions (source.resolve, fields.source)" bash -c "grep -q '\"source\":\"local\"' '$T/log-resolve.json' && grep -q '\"source\":\"github\".*' '$T/log-resolve.json' && grep -q '\"package\":\"@e2euser/js-lib\"' '$T/log-resolve.json'"
 check "logs record register and unregister" bash -c "grep -q '\"event\":\"local.register\"' '$T/log-local.json' && grep -q '\"event\":\"local.unregister\"' '$T/log-local.json'"
 check "log store lives in the config dir, 0700, files 0600" bash -c "[ -d '$CONSONA_CONFIG_DIR/logs' ] && [ \$(perm '$CONSONA_CONFIG_DIR/logs') = 700 ] && for f in '$CONSONA_CONFIG_DIR'/logs/*; do [ -d \"\$f\" ] || [ \$(perm \"\$f\") = 600 ] || exit 1; done"
-TOKV=${!OWNER_ENV:-$(gh auth token 2>/dev/null)}   # compared only, never printed
+TOKV=${!OWNER_ENV:-}   # compared only, never printed
+[ -n "$TOKV" ] || TOKV=$(gh auth token 2>/dev/null) || TOKV=$(gh config get -h github.com oauth_token 2>/dev/null)   # gh < 2.17
 LEAK=0
-if [ -n "$TOKV" ]; then grep -rqF -- "$TOKV" "$CONSONA_CONFIG_DIR" "$CONSONA_HOME" "$T"/*.out "$T"/*.json 2>/dev/null && LEAK=1; fi
+if [ ${#TOKV} -ge 20 ]; then grep -rqF -- "$TOKV" "$CONSONA_CONFIG_DIR" "$CONSONA_HOME" "$T"/*.out "$T"/*.json 2>/dev/null && LEAK=1
+else fail "could not read the fixture token for the leak check"; fi
 grep -rqE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' "$T/log-resolve.json" "$T/log-local.json" "$CONSONA_CONFIG_DIR/logs" 2>/dev/null && LEAK=1
 unset TOKV
 check "no token value (or token-shaped string) in logs, config, consona home or outputs" test $LEAK -eq 0
