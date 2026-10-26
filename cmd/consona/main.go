@@ -29,6 +29,7 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
   consona setup --undo                 restore your previous npm settings, remove auto-start (alias: uninstall)
   consona install [npm args...]        npm install (starts the daemon if needed)
   consona audit [npm args...]          npm audit (starts the daemon if needed)
+  consona ci [npm args...]             ci runners: temporary daemon + npm ci
   consona daemon start|stop|status     manage the local daemon
   consona token add|list|test|remove   optional named GitHub tokens (see "consona token help")
   consona logs [filters] | export | prune | clear | info
@@ -59,7 +60,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 // the log store.
 var logsEvents = map[string]bool{"setup": true, "uninstall": true, "install": true, "i": true, "audit": true,
 	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true,
-	"remote-serve": true, "which": true}
+	"remote-serve": true, "which": true, "ci": true}
 
 func fail(format string, a ...any) int {
 	fmt.Fprintf(os.Stderr, "consona: "+format+"\n", a...)
@@ -179,6 +180,8 @@ func run(args []string) int {
 		return newTokenCmd().run(ctx, args[1:])
 	case "logs", "log":
 		return runLogs(cfg, args[1:])
+	case "ci":
+		return runCi(ctx, cfg, args[1:])
 	case "install", "i", "audit":
 		if err := npm.CheckSetup(npmBase); err != nil {
 			return fail("%v", err)
