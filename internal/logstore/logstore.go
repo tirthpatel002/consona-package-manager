@@ -62,6 +62,8 @@ const (
 	EvDevProjectTracked     = "dev.project_tracked"
 	EvDevSync               = "dev.sync"
 	EvDevBuild              = "dev.build"
+	EvCIStart               = "ci.start"
+	EvCIFinish              = "ci.finish"
 	EvLogstore              = "logstore"
 	EvError                 = "error"
 )
@@ -71,7 +73,7 @@ var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFin
 	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvPeerLookup, EvCredentialResolve, EvCredentialFail,
 	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvSourceNameMismatch, EvSourceRedirect, EvSourceTagMoved,
 	EvPublicLookalike, EvPublicLookalikeCheck, EvLocalRegister, EvLocalUnregister,
-	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvDevProjectTracked, EvDevSync, EvDevBuild, EvBuildCacheRemoteHit, EvBuildCacheRemoteMiss, EvBuildCacheRemoteError, EvCachePrune, EvLogstore, EvError}
+	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvDevProjectTracked, EvDevSync, EvDevBuild, EvBuildCacheRemoteHit, EvBuildCacheRemoteMiss, EvBuildCacheRemoteError, EvCachePrune, EvCIStart, EvCIFinish, EvLogstore, EvError}
 
 // Entry is one event. Both backends store exactly these fields.
 type Entry struct {

@@ -32,6 +32,7 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
   consona check [dir] [--json]        check private dependencies for public lookalikes
   consona dev <@scope/pkg> [--project DIR ...] [--interval 500ms] [--once] | --list
                                        live sync a registered local package into projects
+  consona ci [npm args...]             ci runners: temporary daemon + npm ci
   consona daemon start|stop|status     manage the local daemon
   consona token add|list|test|remove   optional named GitHub tokens (see "consona token help")
   consona logs [filters] | export | prune | clear | info
@@ -64,7 +65,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 // the log store.
 var logsEvents = map[string]bool{"setup": true, "uninstall": true, "install": true, "i": true, "audit": true,
 	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true,
-	"remote-serve": true, "which": true, "check": true, "dev": true, "cache": true}
+	"remote-serve": true, "which": true, "check": true, "dev": true, "cache": true, "ci": true}
 
 func fail(format string, a ...any) int {
 	fmt.Fprintf(os.Stderr, "consona: "+format+"\n", a...)
@@ -188,6 +189,8 @@ func run(args []string) int {
 		return runWhy(cfg, args)
 	case "cache":
 		return runCache(cfg, args[1:])
+	case "ci":
+		return runCi(ctx, cfg, args[1:])
 	case "install", "i", "audit":
 		if err := npm.CheckSetup(npmBase); err != nil {
 			return fail("%v", err)
