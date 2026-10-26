@@ -37,7 +37,7 @@ func TestDevProjectTrackingWhenTarballServed(t *testing.T) {
 	h.base = srv.URL
 	defer srv.Close()
 
-	// 1. Packument request: should NOT track dev project (not a tarball)
+	// 1. Packument request: tracks the project (npm may take the tarball from its cache)
 	resp, err := srv.Client().Get(srv.URL + "/@me%2flib")
 	if err != nil {
 		t.Fatal(err)
@@ -49,11 +49,11 @@ func TestDevProjectTrackingWhenTarballServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projs) != 0 {
-		t.Fatalf("expected 0 tracked projects after packument request, got %d", len(projs))
+	if len(projs) != 1 {
+		t.Fatalf("expected 1 tracked project after packument request, got %d", len(projs))
 	}
 
-	// 2. Tarball request: should track dev project
+	// 2. Tarball request: tracks (or refreshes) the same project
 	resp, err = srv.Client().Get(srv.URL + "/@me/lib/-/me-lib-1.0.0-local.1.haaaaaaaa.tgz")
 	if err != nil {
 		t.Fatal(err)

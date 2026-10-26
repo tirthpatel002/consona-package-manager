@@ -305,6 +305,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
+	// Track the project on the packument too: npm often takes a local
+	// package tarball from its own cache (the npm pack of the build fills
+	// it), so the tarball request alone misses projects for consona dev.
+	h.trackDevProject(r, name, ref)
 	logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallResolve, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 		Repo: ref.Name, Result: "ok", DurationMS: time.Since(start).Milliseconds(), Fields: map[string]any{"versions": len(pkgs)}})
 }
