@@ -31,7 +31,8 @@ consona: source: @acme/util@0.0.0-1282889 <- github github.com/acme/util
 - Stored in `$CONSONA_CONFIG_DIR` (default: `~/.config/consona` on Linux,
   `~/Library/Application Support/consona` on macOS, `%AppData%\consona` on
   Windows): `identity.json`, `local-index.json` (registered folders) and
-  `remotes.json`, 0600.
+  `remotes.json`, 0600, written atomically, next to the token index and the
+  event log (see [Config directory](../README.md#config-directory)).
 - `consona setup` works without a GitHub login (devices that only use local
   folders and ssh remotes); it then routes `@username` and the scopes of
   your registered folders to consona.
@@ -164,18 +165,27 @@ Why it stays fast:
 - **The remote needs consona** on its non-interactive PATH (or
   `--remote-cmd`). There is no agentless mode.
 - The remote builds with its own npm config and toolchain; a package that
-  needs private dependencies must be installable on the remote.
+  needs private dependencies must be installable on the remote. GitHub
+  dependencies of a remote build are fetched by the **remote's** consona
+  with the **remote's** credential chain (its `CONSONA_TOKEN_<OWNER>`,
+  named tokens, gh login, ...); the client never forwards a token over ssh.
 - Remote packages are not auto-updated by `consona install`; run
   `npm update <name>` (local folders are auto-updated).
 - Only npm is wired up; the source layer is tool-agnostic.
 
 ## Integration hooks
 
-- `chain.EventSink` (`Resolved(Resolution)`) receives one event per
-  resolution (name, version, source kind, location, device, duration,
-  error). It is the place to plug a log store; the daemon exposes the
-  recent ones at `GET /-/consona/resolutions?since=<unix-ns>` (loopback
-  only) for the CLI's "source:" lines.
+- `chain.EventSink` (`Resolved(Resolution)`, optionally
+  `chain.FailureSink.ResolveFailed`) receives one event per resolution
+  (name, version, source kind, location, device) and per name no source
+  had (with what was tried). consona's sink writes them to the event log
+  as `source.resolve` / `source.fail`; ssh probes are logged as `ssh.probe`
+  (`sshremote.Manager.OnProbe`). The daemon also exposes the recent ones
+  at `GET /-/consona/resolutions?since=<unix-ns>` (loopback only) for the
+  CLI's "source:" lines.
+- Error messages name what was tried: a missing name lists this device's
+  folders, every ssh remote with its state (reachable without it,
+  unreachable and why, no consona) and every GitHub credential source.
 - `core.Live` (sources whose answer changes without a commit: skip the
   resolve memo) and `core.Prebuilt` (sources that hand back a finished
   tarball, e.g. ssh) are optional interfaces on `core.Source`.
@@ -184,7 +194,7 @@ Why it stays fast:
 
 | variable | meaning |
 |---|---|
-| `CONSONA_CONFIG_DIR` | identity + registered folders + remotes |
+| `CONSONA_CONFIG_DIR` | identity + registered folders + remotes (+ token index, logs) |
 | `CONSONA_HOME` | caches, version counters, remote state, ssh sockets |
 | `CONSONA_SSH_CONFIG` | ssh config file to use (default: ssh's own) |
 | `CONSONA_SSH_AUTODETECT=0` | do not try `~/.ssh/config` hosts |

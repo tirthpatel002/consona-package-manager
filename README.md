@@ -153,7 +153,9 @@ daemon is started from your shell by `consona install` / `consona daemon start`.
 
 ## Logs
 
-consona records what it does (resolves, fetches, builds, credential
+consona records what it does (resolves, fetches, builds, where each
+private package came from (local folder, ssh remote or GitHub), register /
+unregister, remote add / remove / test and ssh probe failures, credential
 choices and failures, audit filtering, daemon start/stop) in a structured
 log store, separate from the token index, so you can answer "why did this
 install fail?" after the fact:
@@ -162,6 +164,8 @@ install fail?" after the fact:
 consona logs --errors --since 2h
 consona logs --package @acme/lib --limit 20
 consona logs --event credential --json      # credential.resolve / credential.fail
+consona logs --event source                 # source.resolve (local|ssh|github) / source.fail
+consona logs --event ssh.probe --errors     # remotes that could not be reached
 consona logs export --format jsonl -o consona-logs.jsonl
 consona logs info                           # backend, path, counts, retention
 consona logs prune                          # apply retention now
@@ -172,11 +176,11 @@ Filters: `--package`, `--owner`, `--event` (name or prefix: `build`,
 `install`, `credential`, ...), `--level` (minimum), `--since`/`--until`
 (`2h`, `7d`, `2026-10-26`, RFC 3339), `--errors`, `--limit`, `--json`.
 
-- Storage: SQLite (pure Go, no cgo) at `<consona home>/logs/events.db` in
+- Storage: SQLite (pure Go, no cgo) at `<config dir>/logs/events.db` in
   WAL mode, so the daemon and CLI can write at the same time. If SQLite
   cannot be opened, created or migrated (locked, corrupt, or a binary built
   with `-tags nosqlite`), consona falls back to rotated JSON-lines files in
-  `<consona home>/logs/jsonl/` (5 MB per file, file-locked) and logs why
+  `<config dir>/logs/jsonl/` (5 MB per file, file-locked) and logs why
   once. Force one with `CONSONA_LOG_BACKEND=sqlite|jsonl`.
 - Each entry has: id, ts (UTC, RFC 3339 with nanoseconds), level, event,
   ecosystem, package, owner, repo, version, commit_sha, credential_source
@@ -196,7 +200,28 @@ Filters: `--package`, `--owner`, `--event` (name or prefix: `build`,
   Reads: `consona logs --package X` / `--errors` on 20,000 entries takes
   about 3 ms with SQLite and about 20 ms with the JSON-lines fallback
   (`go test -bench . ./internal/logstore`).
-- Directory `0700`, files `0600`.
+- Directory `0700`, files `0600`. `CONSONA_LOG_DIR` moves it.
+
+## Config directory
+
+Everything consona knows about *you* lives in one directory, `~/.config/consona`
+(Linux, or `$XDG_CONFIG_HOME/consona`), `~/Library/Application Support/consona`
+(macOS), `%AppData%\consona` (Windows), or `$CONSONA_CONFIG_DIR`:
+
+| file | what | written by |
+|---|---|---|
+| `identity.json` | username + this device's id | `consona init` |
+| `local-index.json` | registered folders (name -> path) | `register` / `unregister` |
+| `remotes.json` | explicit ssh remotes | `remote add` / `remove` |
+| `tokens.json` | named token index (never values; those are in the OS secure store) | `token add` / `remove` |
+| `logs/events.db`, `logs/jsonl/` | event log (`CONSONA_LOG_DIR` overrides) | daemon and CLI |
+
+The directory is `0700`, every file `0600`, and every write is atomic (a
+synced temp file renamed over the old one), so a crash never leaves a
+half-written index. Caches, builds, `daemon.log`, `remotes-state.json` and
+ssh control sockets are disposable and stay in `CONSONA_HOME`.
+`consona whoami`, `consona logs info` and `consona token list` print the
+paths they use in the same `key: value` style.
 
 ## Local folders and other devices (SSH)
 
@@ -313,11 +338,13 @@ scripts/release.sh 1.0.0   # dist/: binaries for linux/darwin amd64+arm64,
 Env:
 
 - `CONSONA_PORT`: daemon port (default 48731).
-- `CONSONA_HOME`: cache, build cache, `daemon.log` and `logs/`. Default is
+- `CONSONA_HOME`: cache, build cache, `daemon.log`, remote state. Default is
   the OS cache dir (`os.UserCacheDir`) plus `consona`: `~/.cache/consona` on
   Linux (`$XDG_CACHE_HOME/consona` if set), `~/Library/Caches/consona` on
   macOS, `%LocalAppData%\consona` on Windows.
-- `CONSONA_CONFIG_DIR`: identity, registered folders, remotes, token index (default: see above).
+- `CONSONA_CONFIG_DIR`: identity, registered folders, remotes, token index, logs (see [Config directory](#config-directory)).
+- `CONSONA_LOG_DIR`: log store directory (default `<config dir>/logs`).
+- `CONSONA_KEYRING_SERVICE`: secure-store service name for named tokens (default `dev.consona.tokens`; tests use a throwaway one).
 - `CONSONA_TOKEN`, `CONSONA_TOKEN_<OWNER>`, `GH_TOKEN`, `GITHUB_TOKEN`,
   `GH_CONFIG_DIR`: credentials (see [GitHub credentials](#github-credentials)).
 - `CONSONA_LOG_BACKEND`, `CONSONA_LOG_MAX_AGE`, `CONSONA_LOG_MAX_SIZE_MB`: log store.
