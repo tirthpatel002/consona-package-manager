@@ -68,6 +68,18 @@ func sayEvent(e logstore.Entry) {
 	if quiet || e.Level == "debug" {
 		return
 	}
+	if e.Event == logstore.EvBuildCacheRemoteHit {
+		remote, _ := e.Fields["remote"].(string)
+		if remote == "" {
+			remote = "remote"
+		}
+		tookStr, _ := e.Fields["took"].(string)
+		if tookStr == "" {
+			tookStr = fmt.Sprintf("%.1fs", float64(e.DurationMS)/1000.0)
+		}
+		say("build cache: got %s@%s (%s) from ssh remote %s in %s", e.Package, e.Version, shortCommit(e.CommitSHA), remote, tookStr)
+		return
+	}
 	say("%s", logstore.Human(e))
 }
 

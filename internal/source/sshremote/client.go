@@ -581,3 +581,101 @@ func (m *Manager) Warm(ctx context.Context) {
 	}
 	wg.Wait()
 }
+
+// Fetch implements core.RemoteCache for Manager: it queries remotes in lookup order,
+// skipping recently offline remotes with a short timeout per remote.
+//
+// Integrity trust note:
+// The remote is a machine configured by the user, but artifacts are verified
+// end-to-end: the size and sha512 announced by the remote are verified when
+// receiving the stream, followed by local verification in core.Engine.
+func (m *Manager) Fetch(ctx context.Context, key string, outPath string) (core.RemoteCacheResult, bool, error) {
+	rs := m.Remotes()
+	if len(rs) == 0 {
+		return core.RemoteCacheResult{}, false, nil
+	}
+	for _, r := range rs {
+		m.mu.Lock()
+		m.load()
+		st := m.states[r.Key()]
+		m.mu.Unlock()
+		if st != nil && !st.OK {
+			age := m.now().Sub(st.At)
+			if (st.NoConsona && age < m.NoConsonaTTL) || (!st.NoConsona && age < m.DownTTL) {
+				continue
+			}
+		}
+
+		rctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		start := time.Now()
+		f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			cancel()
+			return core.RemoteCacheResult{}, false, err
+		}
+
+		h512 := sha512.New()
+		var written int64
+		resp, rerr := m.Client.Do(rctx, r, Request{Op: "cache_fetch", Key: key}, func(resp *Response, rd *bufio.Reader) error {
+			if resp.Size <= 0 {
+				return fmt.Errorf("remote sent non-positive size %d", resp.Size)
+			}
+			n, err := io.CopyN(io.MultiWriter(f, h512), rd, resp.Size)
+			written = n
+			if err != nil {
+				return fmt.Errorf("reading cache artifact truncated after %d of %d bytes: %w", n, resp.Size, err)
+			}
+			return nil
+		})
+		ferr := f.Close()
+		cancel()
+
+		if rerr == nil && ferr != nil {
+			rerr = ferr
+		}
+
+		if rerr != nil {
+			_ = os.Remove(outPath)
+			// If ssh failed or timed out, mark remote down
+			if rctx.Err() != nil || strings.Contains(rerr.Error(), "timed out") || strings.Contains(rerr.Error(), "connection") || strings.Contains(rerr.Error(), "Connection") {
+				m.mu.Lock()
+				m.load()
+				m.states[r.Key()] = &State{
+					Name: r.Name, Target: r.Target, Auto: r.Auto, At: m.now(),
+					OK: false, Err: rerr.Error(),
+				}
+				m.save()
+				m.mu.Unlock()
+			}
+			continue
+		}
+
+		if resp == nil || !resp.OK || resp.NotFound {
+			_ = os.Remove(outPath)
+			continue
+		}
+
+		announced := resp.SHA512
+		if resp.Package != nil && resp.Package.SHA512 != "" {
+			announced = resp.Package.SHA512
+		}
+		computed512 := base64.StdEncoding.EncodeToString(h512.Sum(nil))
+		if announced != "" && computed512 != announced {
+			_ = os.Remove(outPath)
+			continue
+		}
+		if resp.Size > 0 && written != resp.Size {
+			_ = os.Remove(outPath)
+			continue
+		}
+
+		return core.RemoteCacheResult{
+			RemoteLabel: r.Label(),
+			SHA512:      announced,
+			Size:        written,
+			Duration:    time.Since(start),
+		}, true, nil
+	}
+	_ = os.Remove(outPath)
+	return core.RemoteCacheResult{}, false, nil
+}
