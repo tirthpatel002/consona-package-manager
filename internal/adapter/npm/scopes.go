@@ -7,6 +7,11 @@ package npm
 // routed scopes.
 var ExtraScopes func() map[string]bool
 
+// PrivateScopes is RoutedScopes plus ExtraScopes.
+func PrivateScopes() map[string]bool {
+	return privateScopes()
+}
+
 // privateScopes is RoutedScopes plus ExtraScopes.
 func privateScopes() map[string]bool {
 	s := RoutedScopes()

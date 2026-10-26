@@ -110,6 +110,7 @@ func manifestName(v *core.Version) string {
 // this daemon built it (lockfiles then fail with EINTEGRITY).
 func (h *handler) checkName(ref core.Ref, name string, v *core.Version) {
 	core.Touch(core.RedirectKey(ref.Owner, ref.Name)) // memoised versions: the source was not asked again
+	core.Touch("lookalike|" + name)
 	if v == nil {
 		return
 	}
