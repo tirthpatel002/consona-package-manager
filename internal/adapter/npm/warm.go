@@ -59,6 +59,11 @@ func WarmNames(dir string, args []string, scopes map[string]bool) []string {
 	return out
 }
 
+// Warm requests the daemon to prefetch and prebuild private packages.
+func Warm(baseURL string, names []string) {
+	warm(baseURL, names)
+}
+
 func warm(baseURL string, names []string) {
 	if len(names) == 0 {
 		return

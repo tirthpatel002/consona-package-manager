@@ -293,7 +293,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	contentType := "application/json"
+	if strings.Contains(r.Header.Get("Accept"), "application/vnd.npm.install-v1+json") {
+		contentType = "application/vnd.npm.install-v1+json"
+	}
+	w.Header().Set("Content-Type", contentType)
 	_, _ = w.Write(body)
 	logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallResolve, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 		Repo: ref.Name, Result: "ok", DurationMS: time.Since(start).Milliseconds(), Fields: map[string]any{"versions": len(pkgs)}})

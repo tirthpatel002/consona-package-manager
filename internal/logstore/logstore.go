@@ -53,6 +53,7 @@ const (
 	EvRemoteRemove       = "remote.remove"
 	EvRemoteTest         = "remote.test"
 	EvSSHProbe           = "ssh.probe" // a remote's package list was fetched (failures at warn)
+	EvPMDetect           = "pm.detect" // package manager detected or selected
 	EvLogstore           = "logstore"
 	EvError              = "error"
 )
@@ -61,7 +62,7 @@ const (
 var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFinish, EvDaemonStart, EvDaemonStop,
 	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvPeerLookup, EvCredentialResolve, EvCredentialFail,
 	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvSourceNameMismatch, EvSourceRedirect, EvSourceTagMoved, EvLocalRegister, EvLocalUnregister,
-	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvLogstore, EvError}
+	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvPMDetect, EvLogstore, EvError}
 
 // Entry is one event. Both backends store exactly these fields.
 type Entry struct {

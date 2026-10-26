@@ -18,6 +18,7 @@ import (
 	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 
 	npmadapter "github.com/tirthpatel002/consona-package-manager/internal/adapter/npm" // adapters register themselves
+	_ "github.com/tirthpatel002/consona-package-manager/internal/adapter/pnpm"
 )
 
 const usage = `consona: private packages from your GitHub repos, zero repo setup.
@@ -27,8 +28,11 @@ const usage = `consona: private packages from your GitHub repos, zero repo setup
                                        everything else via your previous registry, with your login)
                                        and start the daemon at login (systemd/launchd/logon task)
   consona setup --undo                 restore your previous npm settings, remove auto-start (alias: uninstall)
-  consona install [npm args...]        npm install (starts the daemon if needed)
-  consona audit [npm args...]          npm audit (starts the daemon if needed)
+  consona install [--pm npm|pnpm] [args...]
+                                       install packages (starts the daemon if needed; auto-detects
+                                       npm vs pnpm via package.json packageManager or pnpm-lock.yaml)
+  consona audit [--pm npm|pnpm] [args...]
+                                       audit packages (starts the daemon if needed)
   consona daemon start|stop|status     manage the local daemon
   consona token add|list|test|remove   optional named GitHub tokens (see "consona token help")
   consona logs [filters] | export | prune | clear | info
@@ -180,26 +184,50 @@ func run(args []string) int {
 	case "logs", "log":
 		return runLogs(cfg, args[1:])
 	case "install", "i", "audit":
-		if err := npm.CheckSetup(npmBase); err != nil {
-			return fail("%v", err)
-		}
-		say("npm is set up for consona (%s)", npmadapter.UserConfig())
-		if err := ensureDaemon(cfg); err != nil {
-			return fail("%v", err)
-		}
-		start := time.Now()
 		cmdName := "install"
 		if args[0] == "audit" {
 			cmdName = "audit"
 		}
-		npmCmd := npmArgs(append([]string{cmdName}, args[1:]...), quiet, npmadapter.OwnsLoglevel())
-		say("running: npm %s (private scopes via %s, everything else via %s)", strings.Join(npmCmd, " "), npmBase, npmadapter.Upstream())
+		pmName, pmReason, pmCleanArgs, err := detectPM(args[1:], ".")
+		if err != nil {
+			return fail("%v", err)
+		}
+		if err := checkPMInstalled(pmName); err != nil {
+			return fail("%v", err)
+		}
+		if err := npm.CheckSetup(npmBase); err != nil {
+			return fail("%v", err)
+		}
+		say("npm is set up for consona (%s)", npmadapter.UserConfig())
+		say("using %s (%s)", pmName, pmReason)
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvPMDetect,
+			Level:     "info",
+			Ecosystem: pmName,
+			Result:    "ok",
+			Message:   fmt.Sprintf("using %s (%s)", pmName, pmReason),
+		})
+		if err := ensureDaemon(cfg); err != nil {
+			return fail("%v", err)
+		}
+		start := time.Now()
+		var pmCmd []string
+		if pmName == "pnpm" {
+			pmCmd = pnpmArgs(append([]string{cmdName}, pmCleanArgs...), quiet)
+		} else {
+			pmCmd = npmArgs(append([]string{cmdName}, pmCleanArgs...), quiet, npmadapter.OwnsLoglevel())
+		}
+		say("running: %s %s (private scopes via %s, everything else via %s)", pmName, strings.Join(pmCmd, " "), npmBase, npmadapter.Upstream())
 		stopFollow := followDaemon(cfg, start)
-		code := npm.Exec(ctx, npmBase, npmCmd)
+		adapter, ok := core.Lookup(pmName)
+		if !ok {
+			adapter = npm
+		}
+		code := adapter.Exec(ctx, npmBase, pmCmd)
 		stopFollow()
-		say("npm %s exited with code %d after %s", cmdName, code, time.Since(start).Round(time.Millisecond))
+		say("%s %s exited with code %d after %s", pmName, cmdName, code, time.Since(start).Round(time.Millisecond))
 		if code == 0 && cmdName == "install" {
-			localcli.AfterInstall(ctx, cfg, npm, npmBase, append([]string{cmdName}, args[1:]...), start)
+			localcli.AfterInstall(ctx, cfg, adapter, npmBase, append([]string{cmdName}, pmCleanArgs...), start)
 		}
 		for _, m := range daemon.WarningsSince(cfg, start) {
 			fmt.Fprintln(os.Stderr, "consona: warning:", m)
