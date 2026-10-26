@@ -11,15 +11,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/tirthpatel002/consona-package-manager/internal/config"
-	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/tirthpatel002/consona-package-manager/internal/config"
+	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/adapter/npm"
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
@@ -629,7 +631,7 @@ func AfterInstall(ctx context.Context, cfg daemon.Config, a core.Adapter, base s
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	fmt.Fprintf(os.Stderr, "consona: local folder changed for %s: npm update\n", strings.Join(names, ", "))
+	fmt.Fprintf(os.Stderr, "consona: local folder changed for %s: %s update\n", strings.Join(names, ", "), a.Name())
 	t := time.Now()
 	a.Exec(ctx, base, append([]string{"update"}, names...))
 	for _, l := range daemon.ResolutionsSince(cfg, t) {
@@ -640,12 +642,12 @@ func AfterInstall(ctx context.Context, cfg daemon.Config, a core.Adapter, base s
 	}
 }
 
-// staleLocal maps registered package names in ./package-lock.json whose
+// staleLocal maps registered package names in ./package-lock.json or ./pnpm-lock.yaml whose
 // locked version differs from the folder's current version to the latter.
 func staleLocal(dir string) map[string]string {
 	b, err := os.ReadFile(filepath.Join(dir, "package-lock.json"))
 	if err != nil {
-		return nil
+		return staleLocalPnpm(dir)
 	}
 	var lock struct {
 		Packages map[string]struct {
@@ -675,4 +677,57 @@ func staleLocal(dir string) map[string]string {
 		}
 	}
 	return out
+}
+
+func staleLocalPnpm(dir string) map[string]string {
+	b, err := os.ReadFile(filepath.Join(dir, "pnpm-lock.yaml"))
+	if err != nil {
+		return nil
+	}
+	idx := localindex.Open()
+	es, _ := idx.List()
+	if len(es) == 0 {
+		return nil
+	}
+	src := local.New(idx, core.Home())
+	out := map[string]string{}
+	content := string(b)
+	for _, e := range es {
+		locked := findPnpmLockedVersion(content, e.Name)
+		if locked == "" {
+			continue
+		}
+		scope, pkg, _ := localindex.SplitName(e.Name)
+		c, err := src.Resolve(core.Ref{Owner: scope, Name: pkg})
+		if err == nil && c.Version != locked {
+			out[e.Name] = c.Version
+		}
+	}
+	return out
+}
+
+func findPnpmLockedVersion(content, pkgName string) string {
+	escaped := regexp.QuoteMeta(pkgName)
+	re := regexp.MustCompile(`['"\s]` + escaped + `@([^'"\s(:)]+)`)
+	m := re.FindStringSubmatch(content)
+	if len(m) > 1 {
+		return m[1]
+	}
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "'"+pkgName+"':" || trimmed == `"`+pkgName+`":` || trimmed == pkgName+":" {
+			for j := i + 1; j < len(lines) && j < i+10; j++ {
+				sub := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(sub, "version:") {
+					v := strings.TrimSpace(strings.TrimPrefix(sub, "version:"))
+					return strings.Trim(v, `"'()`)
+				}
+				if !strings.HasPrefix(lines[j], " ") && !strings.HasPrefix(lines[j], "\t") {
+					break
+				}
+			}
+		}
+	}
+	return ""
 }

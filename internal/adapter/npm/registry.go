@@ -303,7 +303,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	contentType := "application/json"
+	if strings.Contains(r.Header.Get("Accept"), "application/vnd.npm.install-v1+json") {
+		contentType = "application/vnd.npm.install-v1+json"
+	}
+	w.Header().Set("Content-Type", contentType)
 	_, _ = w.Write(body)
 	// Track the project on the packument too: npm often takes a local
 	// package tarball from its own cache (the npm pack of the build fills
