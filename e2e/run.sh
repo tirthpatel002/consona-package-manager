@@ -278,7 +278,7 @@ NGH=$(grep '"source":"github"' "$TMP/log-resolve.json" | grep -o '"package":"[^"
 check "event log: GitHub resolutions recorded in the config dir's log store ($NGH private packages, source=github)" \
   bash -c "[ $NGH -ge 4 ] && [ -d '$CONSONA_CONFIG_DIR/logs' ] && ! grep -qE 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_' '$TMP/log-resolve.json'"
 [ -n "$TOKN" ] && check "event log: the daemon read GitHub with the named token e2e-fixture (credential_source)" \
-  bash -c "'$BIN' logs --json 2>/dev/null | grep -qF 'named token \\\"e2e-fixture'"
+  bash -c "'$BIN' logs --event credential.resolve --limit 100000 --json 2>/dev/null | grep -qF 'named token \\\"e2e-fixture'"
 if [ -n "$TOKN" ]; then TOK=$TOKN; else TOK=$(gh auth token 2>/dev/null) || TOK=$(gh config get -h github.com oauth_token); fi
 [ ${#TOK} -ge 20 ] || fail "could not read gh token for leak check"
 LEAKS=$(grep -rlF -f <(printf '%s\n' "$TOK") "$TMP" 2>/dev/null | wc -l); unset TOK   # pattern via a pipe, never a file
@@ -319,13 +319,23 @@ check "2nd instance: npm registry = consona, previous = token-requiring fake" te
 W=$(in2 npm whoami 2>"$TMP/whoami.err"); check "auth from user npmrc: npm whoami through consona = $W" test "$W" = "e2e-user"
 mkdir -p "$TMP/app2" && echo '{"name":"app2","private":true,"version":"0.0.0"}' > "$TMP/app2/package.json"
 printf '%s:_authToken=${NPM_TOKEN}\n' "$NERF" > "$TMP/app2/.npmrc"
+# The daemon sees the calling npm's project npmrc and env only on Linux (peer
+# process via /proc); elsewhere it uses the user/global npmrc and its own env.
+if [ "$OS" = Linux ]; then
 W=$(cd "$TMP/app2" && NPM_TOKEN=$T2 in2 npm whoami 2>/dev/null)
 check "auth from project .npmrc with \${NPM_TOKEN} in npm's env (beats user npmrc): $W" test "$W" = "e2e-project-user"
 W=$(cd "$TMP/app2" && NPM_TOKEN=$T2 in2 env "npm_config_${NERF}:_authToken=$T3" npm whoami 2>/dev/null)
 check "auth from npm_config_//host/:_authToken env (beats project): $W" test "$W" = "e2e-env-user"
+else
+  echo "SKIP  auth from the calling npm's project .npmrc / env: peer-process lookup is Linux-only (daemon uses the user npmrc on $OS)"
+fi
 (cd "$TMP/app2" && NPM_TOKEN=$T2 in2 npm install "@acme/secret" "@$OWNER/consona-e2e-lib-c" --loglevel http > "$TMP/install2.out" 2>&1); rc=$?
 check "install auth-only @acme/secret + private lib-c (rc=$rc)" bash -c "[ $rc -eq 0 ] && [ -f '$TMP/app2/node_modules/@acme/secret/index.js' ] && [ -f '$TMP/app2/node_modules/@$OWNER/consona-e2e-lib-c/package.json' ]"
-check "fake got the auth-only packument via consona with the project login" grep -q 'GET /@acme/secret auth=true user=e2e-project-user' "$FLOG"
+if [ "$OS" = Linux ]; then
+  check "fake got the auth-only packument via consona with the project login" grep -q 'GET /@acme/secret auth=true user=e2e-project-user' "$FLOG"
+else
+  check "fake got the auth-only packument via consona with the user npmrc login" grep -q 'GET /@acme/secret auth=true user=e2e-user' "$FLOG"
+fi
 rm -f "$TMP/app2/.npmrc"   # the rest of the checks use the user npmrc login
 check "install-time audit forwarded to the fake with auth, private names withheld" grep -q 'POST /-/npm/v1/security/advisories/bulk auth=true' "$FLOG"
 mkdir -p "$TMP/pub" "$TMP/priv" "$TMP/otp1" "$TMP/otp2"

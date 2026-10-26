@@ -43,7 +43,7 @@ if command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$@"; } else 
 export -f perm sha256
 secs() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", b-a}'; }
 show() { sed 's/^/      | /' "$1"; }
-FIX=$T/fixtures
+FIX=$(cd "$T" && pwd -P)/fixtures   # physical path: consona prints resolved folders (/tmp -> /private/tmp on macOS)
 mkdir -p "$FIX/js-lib" "$FIX/ts-lib/src" "$FIX/shadow-lib-a"
 echo 'exports.greet = (n) => `hello ${n} from js-lib v1`;' > "$FIX/js-lib/index.js"
 echo 'not published (outside files)' > "$FIX/js-lib/notes.txt"

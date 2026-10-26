@@ -158,7 +158,7 @@ run_in() {   # run_in NAME PATH [VAR=val ...] -- cmd...
   env -i HOME="$TMP/$name-home" PATH="$path" USER="${USER:-e2e}" LANG=C.UTF-8 TMPDIR="$TMP" \
     DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/consona-e2e \
     CONSONA_HOME="$TMP/$name-consona" CONSONA_PORT="$PORT" npm_config_userconfig="$TMP/$name.npmrc" \
-    npm_config_update_notifier=false npm_config_fund=false "${vars[@]}" "$@"
+    npm_config_update_notifier=false npm_config_fund=false ${vars[@]+"${vars[@]}"} "$@"
 }
 install_in() {   # install_in NAME PATH VARS... : setup + install the app, prints seconds
   local name=$1 path=$2; shift 2

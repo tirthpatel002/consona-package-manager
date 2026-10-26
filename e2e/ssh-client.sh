@@ -60,11 +60,11 @@ REMOTE_I=$(ssh -F "$CONSONA_SSH_CONFIG" -o BatchMode=yes consona-remote "cat $(d
 check "end-to-end sha512: client lockfile integrity = the remote's built tarball" bash -c "grep -qxF -- '$I' <<< '$REMOTE_I'"
 rm -rf "$B/app/node_modules"; t0=$(now); (cd "$B/app" && "$BIN" install > "$B/inst2.out" 2>&1); rc=$?; t1=$(now)
 check "reinstall from lockfile rc=$rc [$(secs $t0 $t1)s]" test $rc -eq 0
-"$BIN" remote add vm $RU@$VM "${IDF[@]}" --remote-cmd $RS > "$B/add.out" 2>&1; rc=$?; show "$B/add.out"
+"$BIN" remote add vm $RU@$VM ${IDF[@]+"${IDF[@]}"} --remote-cmd $RS > "$B/add.out" 2>&1; rc=$?; show "$B/add.out"
 check "remote add (explicit, tested on add) rc=$rc" bash -c "[ $rc -eq 0 ] && grep -q 'ok: @e2euser' '$B/add.out'"
 "$BIN" which @e2euser/ts-lib > "$B/which.out" 2>&1; show "$B/which.out"
 check "explicit remote is asked before the auto-detected one" grep -q '<- ssh vm ' "$B/which.out"
-"$BIN" remote add nocon $RU@$VM "${IDF[@]}" --remote-cmd /nonexistent/consona > "$B/nocon.out" 2>&1; rc=$?; show "$B/nocon.out"
+"$BIN" remote add nocon $RU@$VM ${IDF[@]+"${IDF[@]}"} --remote-cmd /nonexistent/consona > "$B/nocon.out" 2>&1; rc=$?; show "$B/nocon.out"
 check "remote without consona: clear error" bash -c "[ $rc -ne 0 ] && grep -q 'consona is not installed on the remote' '$B/nocon.out'"
 "$BIN" remote add bad ubuntu@192.0.2.1 --no-test > /dev/null 2>&1
 "$BIN" remote list > "$B/list2.out" 2>&1; show "$B/list2.out"
