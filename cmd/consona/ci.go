@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -353,6 +354,7 @@ func runCi(ctx context.Context, initialCfg daemon.Config, args []string) int {
 
 	cfg := daemon.Config{Port: targetPort, Home: tempHome}
 	var daemonStarted bool
+	restoreLog := func() {}
 	daemonErrCh := make(chan error, 1)
 
 	// ALWAYS clean up: stop the daemon and remove temp directories on success, failure, panic, or signals.
@@ -365,6 +367,7 @@ func runCi(ctx context.Context, initialCfg daemon.Config, args []string) int {
 			case <-time.After(2 * time.Second):
 			}
 		}
+		restoreLog()
 		if tempDir != "" {
 			_ = os.RemoveAll(tempDir)
 		}
@@ -393,6 +396,29 @@ func runCi(ctx context.Context, initialCfg daemon.Config, args []string) int {
 
 	// Start consona daemon in-process in a goroutine.
 	src := localcli.NewDaemonSource(cfg.Home)
+	// The daemon runs in this process, where the user npmrc has no consona
+	// scopes (CI never ran consona setup): mark the lockfile and --scope
+	// owners private explicitly, or their tarballs would be sent upstream.
+	prevExtra := npmadapter.ExtraScopes
+	npmadapter.ExtraScopes = func() map[string]bool {
+		s := map[string]bool{}
+		if prevExtra != nil {
+			for k := range prevExtra() {
+				s[k] = true
+			}
+		}
+		for _, sc := range scopes {
+			s[strings.ToLower(sc)] = true
+		}
+		return s
+	}
+	// The in-process daemon logs to daemon.log in the temp home (like a
+	// normal daemon); its events reach the terminal once, via followDaemon.
+	if lf, err := os.OpenFile(cfg.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		prevOut := log.Writer()
+		log.SetOutput(lf)
+		restoreLog = func() { log.SetOutput(prevOut); _ = lf.Close() }
+	}
 	go func() {
 		daemonErrCh <- daemon.Serve(cfg, src)
 	}()
@@ -446,7 +472,9 @@ func runCi(ctx context.Context, initialCfg daemon.Config, args []string) int {
 		childEnv = append(childEnv, "npm_config_replace_registry_host=always")
 	}
 
-	stopFollow := followDaemon(cfg, start)
+	// The daemon runs in this process, so its events already print here
+	// (followDaemon would print each one twice).
+	stopFollow := func() {}
 
 	cmd := exec.CommandContext(ctx, "npm", npmCmd...)
 	if dir != "" && dir != "." {
