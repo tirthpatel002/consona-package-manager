@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +21,11 @@ const Order = `For a package from GitHub owner <owner>, consona tries, in order:
   3. CONSONA_TOKEN           env var
   4. GH_TOKEN, GITHUB_TOKEN  env vars
   5. the default named token (consona token add --default)
-  6. the gh login            (gh auth token / gh config get oauth_token)
+  6. every gh account logged in for github.com (gh auth token --user):
+     the account whose login is <owner> first, then the one remembered
+     for <owner> (probed once, kept in gh-accounts.json), then the active
+     one, then the rest. gh's active account is never changed. With gh
+     older than 2.40 only the active gh login is used.
 If a credential is rejected (401), cannot see the repo (404/403) or is
 rate limited, the next one is tried; the error lists every source tried.`
 
@@ -31,6 +36,7 @@ type Candidate struct {
 	Name    string    // token name (named tokens)
 	Expires time.Time // from the index (named tokens), zero if unknown
 	Value   string    // the token; never print it (use redact.Mask)
+	Why     string    // gh accounts: owner match | remembered | active | other
 	Err     error     // why this source is unavailable (Value is empty)
 }
 
@@ -51,15 +57,23 @@ type Resolver struct {
 	Getenv    func(string) string
 	Store     Store
 	IndexPath string
-	GH        func() (string, error) // the gh login token
-	Environ   func() []string        // for CONSONA_TOKEN_<OWNER> discovery; nil = none
-	TTL       time.Duration
+	GH        func() (string, error) // the gh login token (old gh, or GHAccounts unset)
+	// GHAccounts lists every gh account for github.com with its token;
+	// ErrGHNoUserFlag falls back to GH. nil = only GH.
+	GHAccounts func() ([]GHAccount, error)
+	GHMap      *GHMap          // owner -> gh account that can read it (persisted)
+	Environ    func() []string // for CONSONA_TOKEN_<OWNER> discovery; nil = none
+	TTL        time.Duration
 
 	mu    sync.Mutex
 	cache map[string]cached
 	ghAt  time.Time
 	ghVal string
 	ghErr error
+
+	acctAt  time.Time
+	accts   []GHAccount
+	acctErr error
 }
 
 type cached struct {
@@ -70,7 +84,9 @@ type cached struct {
 // NewResolver uses the process environment, the OS secure store, the
 // token index in ConfigDir and the gh CLI.
 func NewResolver() *Resolver {
-	return &Resolver{Getenv: os.Getenv, Environ: os.Environ, Store: SystemStore{}, IndexPath: IndexPath(), GH: GHLogin, TTL: time.Minute}
+	return &Resolver{Getenv: os.Getenv, Environ: os.Environ, Store: SystemStore{}, IndexPath: IndexPath(), GH: GHLogin,
+		GHAccounts: SystemGHAccounts,
+		GHMap:      &GHMap{Path: GHMapPath()}, TTL: time.Minute}
 }
 
 // EnvName is the per-owner override variable for owner.
@@ -141,6 +157,14 @@ func (r *Resolver) Invalidate() {
 	r.mu.Lock()
 	r.cache = nil
 	r.ghAt = time.Time{}
+	r.acctAt = time.Time{}
+	r.mu.Unlock()
+}
+
+// InvalidateOwner drops the cached candidates of one owner.
+func (r *Resolver) InvalidateOwner(owner string) {
+	r.mu.Lock()
+	delete(r.cache, NormOwner(owner))
 	r.mu.Unlock()
 }
 
@@ -235,14 +259,89 @@ func (r *Resolver) compute(owner string) []Candidate {
 	if !def {
 		add(Candidate{Source: "default named token", Kind: "named", Err: errors.New("none (consona token add --default)")})
 	}
-	c := Candidate{Source: "gh login", Kind: "gh"}
-	if v, err := r.gh(); err != nil {
-		c.Err = err
-	} else {
-		c.Value = v
-	}
-	add(c)
+	r.ghCandidates(owner, add)
 	return out
+}
+
+// Reasons a gh account is tried where it is (Candidate.Why).
+const (
+	WhyOwnerMatch = "owner match"
+	WhyRemembered = "remembered"
+	WhyActive     = "active gh account"
+	WhyOther      = "other gh account"
+)
+
+// ghCandidates adds every gh account (owner match, remembered, active,
+// rest), or the single gh login when gh cannot list accounts.
+func (r *Resolver) ghCandidates(owner string, add func(Candidate)) {
+	accts, err := r.ghAccounts()
+	if r.GHAccounts == nil || errors.Is(err, ErrGHNoUserFlag) {
+		c := Candidate{Source: "gh login", Kind: "gh"}
+		if v, err := r.gh(); err != nil {
+			c.Err = err
+		} else {
+			c.Value = v
+		}
+		add(c)
+		return
+	}
+	if err != nil {
+		add(Candidate{Source: "gh login", Kind: "gh", Err: err})
+		return
+	}
+	mapped := ""
+	if owner != "" {
+		mapped = r.GHMap.Get(owner)
+	}
+	rank := func(a GHAccount) (int, string) {
+		switch {
+		case owner != "" && strings.EqualFold(a.Login, owner):
+			return 0, WhyOwnerMatch
+		case mapped != "" && strings.EqualFold(a.Login, mapped):
+			return 1, WhyRemembered
+		case a.Active:
+			return 2, WhyActive
+		}
+		return 3, WhyOther
+	}
+	sorted := append([]GHAccount(nil), accts...)
+	sort.SliceStable(sorted, func(i, j int) bool { ri, _ := rank(sorted[i]); rj, _ := rank(sorted[j]); return ri < rj })
+	for _, a := range sorted {
+		_, why := rank(a)
+		label := why
+		if why == WhyRemembered {
+			label = "remembered for @" + owner
+		}
+		add(Candidate{Source: fmt.Sprintf("gh account %s (%s)", a.Login, label), Kind: "gh", Name: a.Login, Why: why, Value: a.Token, Err: a.Err})
+	}
+}
+
+// ghAccounts runs the gh account discovery at most once per TTL.
+func (r *Resolver) ghAccounts() ([]GHAccount, error) {
+	if r.GHAccounts == nil {
+		return nil, errors.New("disabled")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.acctAt.IsZero() || time.Since(r.acctAt) >= r.TTL {
+		r.accts, r.acctErr = r.GHAccounts()
+		r.acctAt = time.Now()
+		for _, a := range r.accts {
+			if a.Token != "" {
+				redact.AddSecret(a.Token)
+			}
+		}
+	}
+	return r.accts, r.acctErr
+}
+
+// InvalidateGH re-reads gh's accounts on next use (after a gh token was
+// rejected: it may have been refreshed or logged out).
+func (r *Resolver) InvalidateGH() {
+	r.mu.Lock()
+	r.acctAt, r.ghAt = time.Time{}, time.Time{}
+	r.cache = nil
+	r.mu.Unlock()
 }
 
 // gh runs the gh lookup at most once per TTL.
