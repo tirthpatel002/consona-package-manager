@@ -541,13 +541,21 @@ cat ~/.config/consona/gh-accounts.json   # Linux path; the remembered org -> acc
 
 ```
 consona: @tirthpatel002/gradient via gh account tirthpatel002 (owner match)
-consona: @acme-co/ui via gh account work-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
+consona: @acme-co/ui via gh account your-other-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
 ```
 
 When no account can read the repo, the error lists each one:
 
 ```
-  3. gh account pateltirth2 (active gh account) (gho_…vE2w): 404: acme-co/secret does not exist or this token cannot see it.
-  4. gh account tirthpatel002 (other gh account) (gho_…k9Qd): 404: ...
+  3. gh account your-other-account (active gh account) (gho_…vE2w): 404: acme-co/secret does not exist or this token cannot see it.
+  4. gh account your-github-name (other gh account) (gho_…k9Qd): 404: ...
 ```
 
+
+**Names in these examples:** `your-github-name` and `your-other-account` stand for your own gh logins, and `acme-co` for a GitHub organisation you belong to (see the name table at the top of [examples.md](examples.md)). `tirthpatel002/gradient` is a real package. None of them are consona keywords.
+
+**Limitations:**
+- Needs gh 2.40 or newer. With an older gh, only the active gh login is used.
+- The first time consona sees an organisation, it makes one extra GitHub request per gh account to find out which can see it. That happens once per owner, then the remembered account is used.
+- The probe also runs when an explicit credential (1–5 above) would have worked anyway.
+- The `via gh account ...` line is shown at most once per repo every 30 seconds, so an install straight after another may not repeat it.

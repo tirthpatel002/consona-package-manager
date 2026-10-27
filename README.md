@@ -150,7 +150,7 @@ say which account was used and why:
 
 ```
 consona: @tirthpatel002/gradient via gh account tirthpatel002 (owner match)
-consona: @acme-co/ui via gh account work-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
+consona: @acme-co/ui via gh account your-other-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
 ```
 
 If no account can read a repo, the error lists every gh account tried
