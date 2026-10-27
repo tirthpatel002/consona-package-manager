@@ -69,7 +69,7 @@ func main() { os.Exit(run(os.Args[1:])) }
 // informational commands (version, help, whoami, logs, ...) never create
 // the log store.
 var logsEvents = map[string]bool{"setup": true, "uninstall": true, "install": true, "i": true, "audit": true,
-	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true,
+	"token": true, "tokens": true, "init": true, "register": true, "unregister": true, "remote": true, "map": true,
 	"remote-serve": true, "which": true, "check": true, "dev": true, "cache": true, "ci": true}
 
 func fail(format string, a ...any) int {

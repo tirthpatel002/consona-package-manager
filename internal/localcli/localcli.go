@@ -1,8 +1,9 @@
 // Package localcli implements consona's device-local commands: identity
 // (init, whoami), local package registration (register, registered,
-// unregister), SSH remotes (remote add|list|remove|test, remote-serve) and
-// `which`. It also builds the daemon's source chain. main.go only calls
-// Run, NewDaemonSource, ExtraOwners and AfterInstall.
+// unregister), SSH remotes (remote add|list|remove|test, remote-serve),
+// GitHub folder mappings (map add|list|remove|sync) and `which`. It also
+// builds the daemon's source chain. main.go only calls Run,
+// NewDaemonSource, ExtraOwners and AfterInstall.
 package localcli
 
 import (
@@ -29,7 +30,9 @@ import (
 	"github.com/tirthpatel002/consona-package-manager/internal/daemon"
 	"github.com/tirthpatel002/consona-package-manager/internal/identity"
 	"github.com/tirthpatel002/consona-package-manager/internal/localindex"
+	"github.com/tirthpatel002/consona-package-manager/internal/packmap"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/chain"
+	"github.com/tirthpatel002/consona-package-manager/internal/source/ghfolder"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/github"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/local"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/sshremote"
@@ -52,6 +55,12 @@ const Usage = `
   consona remote list|remove <name>|test [name]
                                        other devices you can ssh into; their registered packages install here
                                        (hosts in ~/.ssh/config are also tried, after explicit remotes)
+  consona map add <@scope/pkg> <owner/repo> <folder>
+                                       serve a package from a folder inside a GitHub repo (a monorepo):
+                                       install @scope/pkg and consona fetches that folder at the repo's
+                                       version. Versions are the repo's tags, shared by its folders.
+  consona map list|remove <@scope/pkg>|sync <owner/repo>
+                                       sync maps everything a repo's root consona.packages.json declares
   consona which <@scope/pkg>           where a package would come from
 `
 
@@ -81,6 +90,8 @@ func Run(args []string) (code int, ok bool) {
 		return cmdRemote(ctx, args[1:]), true
 	case "remote-serve":
 		return cmdServe(ctx), true
+	case "map":
+		return cmdMap(ctx, args[1:]), true
 	case "which":
 		return cmdWhich(ctx, args[1:]), true
 	}
@@ -363,6 +374,113 @@ func cmdUnregister(args []string) int {
 	return 0
 }
 
+// cmdMap manages the folder map: which GitHub repo folder serves a
+// package name (see internal/source/ghfolder).
+func cmdMap(ctx context.Context, args []string) int {
+	sub := ""
+	if len(args) > 0 {
+		sub, args = args[0], args[1:]
+	}
+	m := packmap.Open()
+	switch sub {
+	case "add":
+		if len(args) != 3 {
+			return fail("usage: consona map add <@scope/pkg> <owner/repo> <folder>")
+		}
+		e := packmap.Entry{Name: args[0], Repo: args[1], Path: args[2]}
+		if err := m.Add(e); err != nil {
+			return fail("%v", err)
+		}
+		scope, _ := split(e.Name)
+		logstore.Log(logstore.Entry{Event: logstore.EvFolderMap, Level: "info", Ecosystem: "npm", Package: e.Name, Owner: scope,
+			Result: "ok", Message: "mapped " + e.Name + " to " + e.Repo + "/" + e.Path,
+			Fields: map[string]any{"repo": e.Repo, "path": e.Path}})
+		routeScopes(scope)
+		fmt.Printf("consona: mapped %s to folder %s of github.com/%s (its versions are the repo's tags)\n", e.Name, e.Path, e.Repo)
+		return 0
+	case "list", "ls", "":
+		es, err := m.List()
+		if err != nil {
+			return fail("%v", err)
+		}
+		if len(es) == 0 {
+			fmt.Println("consona: nothing mapped (consona map add <@scope/pkg> <owner/repo> <folder>, or consona map sync <owner/repo>)")
+			return 0
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME	REPO	FOLDER	HOW")
+		for _, e := range es {
+			how := "map add"
+			if e.Synced {
+				how = "map sync"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.Name, e.Repo, e.Path, how)
+		}
+		tw.Flush()
+		return 0
+	case "remove", "rm":
+		if len(args) != 1 {
+			return fail("usage: consona map remove <@scope/pkg>")
+		}
+		if err := m.Remove(args[0]); err != nil {
+			return fail("%v", err)
+		}
+		name := strings.ToLower(args[0])
+		scope, _ := split(name)
+		logstore.Log(logstore.Entry{Event: logstore.EvFolderMap, Level: "info", Ecosystem: "npm", Package: name, Owner: scope,
+			Result: "ok", Message: "unmapped " + name})
+		fmt.Printf("consona: unmapped %s\n", name)
+		return 0
+	case "sync":
+		if len(args) != 1 {
+			return fail("usage: consona map sync <owner/repo>")
+		}
+		owner, repo, ok := strings.Cut(args[0], "/")
+		if !ok || owner == "" || repo == "" {
+			return fail("invalid repo %q: want owner/repo", args[0])
+		}
+		ref := core.Ref{Owner: owner, Name: repo}
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		bs, err := github.New().ReadFile(ctx, ref, "consona.packages.json")
+		if err != nil {
+			logstore.Log(logstore.Entry{Event: logstore.EvFolderMap, Level: "error", Ecosystem: "npm", Owner: owner, Repo: repo,
+				Result: "fail", Message: "sync failed: " + err.Error(), Fields: map[string]any{"repo": args[0]}})
+			return fail("%v", err)
+		}
+		entries, err := packmap.ParseMapFile(bs)
+		if err != nil {
+			return fail("%v", err)
+		}
+		declared, removed, err := m.Sync(args[0], entries)
+		if err != nil {
+			return fail("%v", err)
+		}
+		scopes := map[string]bool{}
+		for _, e := range entries {
+			if sc, _, err := localindex.SplitName(e.Name); err == nil {
+				scopes[sc] = true
+			}
+		}
+		fields := map[string]any{"repo": args[0], "declared": declared, "removed": removed}
+		logstore.Log(logstore.Entry{Event: logstore.EvFolderMap, Level: "info", Ecosystem: "npm", Owner: owner, Repo: repo,
+			Result: "ok", Message: fmt.Sprintf("synced %s: %d packages declared, %d removed", args[0], declared, removed), Fields: fields})
+		fmt.Printf("consona: synced %s: %d package(s) declared", args[0], declared)
+		if removed > 0 {
+			fmt.Printf(", %d no longer declared (unmapped)", removed)
+		}
+		fmt.Println()
+		out := make([]string, 0, len(scopes))
+		for sc := range scopes {
+			out = append(out, sc)
+		}
+		sort.Strings(out)
+		routeScopes(out...)
+		return 0
+	}
+	return fail("usage: consona map add|list|remove|sync")
+}
+
 func cmdRemote(ctx context.Context, args []string) int {
 	sub := ""
 	if len(args) > 0 {
@@ -527,17 +645,19 @@ func cmdServe(ctx context.Context) int {
 	return 0
 }
 
-// NewChain builds the resolution chain: local folders, ssh remotes, GitHub.
+// NewChain builds the resolution chain: local folders, mapped GitHub
+// folders, ssh remotes, GitHub.
 func NewChain(home string) *chain.Chain {
 	idx := localindex.Open()
-	c := &chain.Chain{Local: local.New(idx, home), Remotes: sshremote.NewManager(home), Sink: logSink{}}
+	gh := github.New()
+	c := &chain.Chain{Local: local.New(idx, home), Folders: &ghfolder.Source{Map: packmap.Open(), Gh: gh}, Remotes: sshremote.NewManager(home), Sink: logSink{}}
 	c.Remotes.OnProbe = logProbe
 	if id, err := identity.Load(); err == nil {
 		c.ThisDevice = id.Device.Short()
 	}
 	// GitHub never fails here: credentials (CONSONA_TOKEN_<OWNER>, named
 	// tokens, GH_TOKEN, gh, ...) are resolved per request on this machine.
-	c.GitHub = github.New()
+	c.GitHub = gh
 	return c
 }
 
@@ -565,6 +685,9 @@ func ExtraOwners() []string {
 		set[id.Username] = true
 	}
 	for s := range localindex.Open().Scopes() {
+		set[s] = true
+	}
+	for s := range packmap.Open().Scopes() {
 		set[s] = true
 	}
 	for s := range sshremote.NewManager(core.Home()).Scopes() {

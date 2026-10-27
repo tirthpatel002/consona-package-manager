@@ -335,6 +335,95 @@ func (s *Source) Fetch(ctx context.Context, r core.Ref, commit, dir string) erro
 	return Extract(resp.Body, dir)
 }
 
+// FetchPath downloads the commit tarball and extracts only the folder
+// prefix (slash-separated, relative to the repo root) into dir. The whole
+// tarball is downloaded; files outside the folder never land on disk.
+func (s *Source) FetchPath(ctx context.Context, r core.Ref, commit, prefix, dir string) error {
+	resp, err := s.get(ctx, r.Owner, r.Name, repoPath(r)+"/tarball/"+url.PathEscape(commit), "application/vnd.github+json")
+	if err != nil {
+		return wrap(s, r, err)
+	}
+	defer resp.Body.Close()
+	return ExtractPath(resp.Body, prefix, dir)
+}
+
+// ReadFile returns one file's content at the repo's default branch.
+func (s *Source) ReadFile(ctx context.Context, r core.Ref, path string) ([]byte, error) {
+	resp, err := s.get(ctx, r.Owner, r.Name, repoPath(r)+"/contents/"+path, "application/vnd.github.raw")
+	if err != nil {
+		return nil, wrap(s, r, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+}
+
+// ExtractPath unpacks only the entries under prefix from a GitHub-style
+// tar.gz (single top-level dir) into dir, stripping the top-level
+// component and the prefix. It fails when the prefix names no entry.
+func ExtractPath(r io.Reader, prefix, dir string) error {
+	prefix = strings.Trim(prefix, "/")
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	found := false
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			if !found {
+				return fmt.Errorf("folder %q not found in the repository at this commit", prefix)
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, rel, ok := strings.Cut(h.Name, "/")
+		if !ok || rel == "" {
+			continue
+		}
+		if rel != prefix && !strings.HasPrefix(rel, prefix+"/") {
+			continue
+		}
+		rel = strings.TrimPrefix(strings.TrimPrefix(rel, prefix), "/")
+		if rel == "" {
+			continue // the folder entry itself; created on demand below
+		}
+		rel = filepath.Clean(rel)
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+			return fmt.Errorf("unsafe path in archive: %s", h.Name)
+		}
+		dst := filepath.Join(dir, rel)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return err
+			}
+			found = true
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			mode := os.FileMode(0o644)
+			if h.Mode&0o111 != 0 {
+				mode = 0o755
+			}
+			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(f, tr)
+			f.Close()
+			if err != nil {
+				return err
+			}
+			found = true
+		}
+		// Symlinks and other entry types are skipped (npm pack ignores them too).
+	}
+}
+
 // Extract unpacks a GitHub-style tar.gz (single top-level dir) into dir,
 // dropping the top-level component and rejecting unsafe paths.
 func Extract(r io.Reader, dir string) error {

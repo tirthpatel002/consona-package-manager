@@ -3,8 +3,10 @@
 // and remembers where each package came from.
 //
 // Order: 1. a folder registered on this device (local always wins),
-// 2. explicitly added SSH remotes, 3. hosts auto-detected from
-// ~/.ssh/config, 4. GitHub (@owner/repo). A name in a private scope that
+// 2. a name in the folder map (a folder inside a GitHub repo, see
+// internal/source/ghfolder), 3. explicitly added SSH remotes, 4. hosts
+// auto-detected from ~/.ssh/config, 5. GitHub (@owner/repo). A name in a
+// private scope that
 // none of them has is a clear "not found"; it is never looked up on the
 // public registry (unscoped and non-private names never reach consona's
 // sources: the npm adapter redirects them to the public registry).
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/source/ghfolder"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/local"
 	"github.com/tirthpatel002/consona-package-manager/internal/source/sshremote"
 )
@@ -62,6 +65,9 @@ func (c *Chain) failed(name string, err error) error {
 // tried lists the places a name was looked up, with per-remote state.
 func (c *Chain) tried() []string {
 	out := []string{"this device's registered folders: not registered"}
+	if c.Folders != nil {
+		out = append(out, "the folder map: not mapped")
+	}
 	if c.Remotes != nil {
 		out = append(out, c.Remotes.Tried()...)
 	}
@@ -81,6 +87,7 @@ func (c *Chain) alsoTried(name string, err error) error {
 // Chain implements core.Source, core.Prebuilt and core.Live.
 type Chain struct {
 	Local       *local.Source
+	Folders     *ghfolder.Source   // nil: no mapped GitHub folders
 	Remotes     *sshremote.Manager // nil: no ssh remotes
 	GitHub      core.Source        // nil: not logged in to GitHub
 	ThisDevice  string             // short label of this device, for local resolutions
@@ -108,6 +115,9 @@ func (c *Chain) Describe(ref core.Ref) string {
 // Places lists where a name is looked up, in order.
 func (c *Chain) Places(ref core.Ref) []string {
 	parts := []string{"this device's registered folders"}
+	if c.Folders != nil {
+		parts = append(parts, "the folder map")
+	}
 	if c.Remotes != nil {
 		if n := len(c.Remotes.Remotes()); n > 0 {
 			parts = append(parts, fmt.Sprintf("%d ssh remote(s)", n))
@@ -187,6 +197,16 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 		c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "local", Where: e.Path, Device: c.ThisDevice})
 		return revs, nil
 	}
+	if c.Folders != nil {
+		if _, ok := c.Folders.Lookup(ref); ok {
+			revs, err := c.Folders.Revisions(ctx, ref)
+			if err != nil { // the map is explicit: do not fall through to other sources
+				return nil, c.failed(name, fmt.Errorf("%w (the folder map wins: ssh remotes and GitHub were not tried)", err))
+			}
+			c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "github-folder", Where: c.Folders.Describe(ref)})
+			return revs, nil
+		}
+	}
 	type ghResult struct {
 		revs []core.Revision
 		err  error
@@ -231,6 +251,11 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 
 // Fetch dispatches by revision kind.
 func (c *Chain) Fetch(ctx context.Context, ref core.Ref, commit, dir string) error {
+	if c.Folders != nil {
+		if _, ok := c.Folders.Lookup(ref); ok {
+			return c.Folders.Fetch(ctx, ref, commit, dir)
+		}
+	}
 	switch {
 	case strings.HasPrefix(commit, local.CommitPrefix):
 		return c.Local.Fetch(ctx, ref, commit, dir)
@@ -270,6 +295,11 @@ func (c *Chain) RemoteCache() core.RemoteCache {
 // the npmrc: registered folders' scopes and scopes seen on remotes.
 func (c *Chain) PrivateScopes() map[string]bool {
 	out := c.Local.Index.Scopes()
+	if c.Folders != nil {
+		for s := range c.Folders.Map.Scopes() {
+			out[s] = true
+		}
+	}
 	if c.Remotes != nil {
 		for s := range c.Remotes.Scopes() {
 			out[s] = true

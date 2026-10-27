@@ -1,6 +1,6 @@
 # consona
 
-**In two lines:** consona turns every package you own, wherever it lives, into a plain `npm install`: private GitHub repos, folders on this machine, and packages on your other machines over SSH, all served as `@owner/name` from one local registry, with no publishing and no repo changes.
+**In two lines:** consona turns every package you own, wherever it lives, into a plain `npm install`: private GitHub repos, folders inside them (monorepos), folders on this machine, and packages on your other machines over SSH, all served as `@owner/name` from one local registry, with no publishing and no repo changes.
 Run `consona setup` once: local copies win over remote ones so nothing is duplicated, and public npm keeps working exactly as before.
 
 ## Executive summary
@@ -296,6 +296,7 @@ Everything consona knows about *you* lives in one directory, `~/.config/consona`
 | `identity.json` | username + this device's id | `consona init` |
 | `local-index.json` | registered folders (name -> path) | `register` / `unregister` |
 | `remotes.json` | explicit ssh remotes | `remote add` / `remove` |
+| `folder-map.json` | package name -> folder inside a GitHub repo | `map add` / `remove` / `sync` |
 | `tokens.json` | named token index (never values; those are in the OS secure store) | `token add` / `remove` |
 | `logs/events.db`, `logs/jsonl/` | event log (`CONSONA_LOG_DIR` overrides) | daemon and CLI |
 
@@ -316,10 +317,54 @@ npm install @tirth/my-lib           # this device's folders > ssh remotes > GitH
 ```
 
 Every install says where each package came from (`<- local ...`,
-`<- ssh devbox ...`, `<- github ...`). Folders are versioned by content
+`<- ssh devbox ...`, `<- github ...`; mapped folders show the repo and
+folder). Folders are versioned by content
 hash (`1.0.0-local.3.h2cab0880`) and rebuilt only when they change. Hosts
 in `~/.ssh/config` are found automatically. Details, versioning, caching,
 timings and limits: [docs/local-and-ssh.md](docs/local-and-ssh.md).
+
+## Folders inside GitHub repos (monorepos)
+
+A repo can serve many packages: map a name to one folder of it, and
+`npm install` fetches just that folder, with the repo's version tags as
+the package's versions.
+
+```sh
+consona map add @acme/widgets-core acme/widgets packages/core
+npm install @acme/widgets-core        # npm and pnpm, like any consona package
+```
+
+Mapped packages depend on each other by their normal names
+(`"@acme/widgets-ui": "^1.0.0"` in `packages/core/package.json` just
+works when both are mapped). Mapped scopes are routed to consona by
+`consona setup` like your other scopes.
+
+A repo that keeps a `consona.packages.json` at its root maps everything
+it declares in one step:
+
+```json
+{"packages":[{"name":"@acme/widgets-core","path":"packages/core"},
+             {"name":"@acme/widgets-ui","path":"packages/ui"}]}
+```
+
+```sh
+consona map sync acme/widgets   # add, update and unmap to match the repo
+consona map list                # what this device maps, and how (add | sync)
+consona map remove @acme/widgets-core
+```
+
+Versions are the repo's version tags, shared by every folder in it. An
+untagged repo serves its default-branch head as `0.0.0-<commit>` (a
+prerelease), so on an untagged repo dependencies between folders need a
+range that admits it (for example `>=0.0.0-0`); `^1.0.0` matches only
+once the repo carries a `v1.x` tag. Tag the repo to give its folders real
+semver. Only the mapped folder is extracted from the commit tarball
+(files outside it never land on disk, though the tarball itself is
+downloaded whole); the cache keys builds by package name, commit and
+version, so after remapping an existing name to different content at the
+same commit, prune the cache (`consona cache`) or bump the commit. A
+mapped name wins over ssh remotes and GitHub repos of the same name; a
+registered local folder still wins over the map.
 
 ## Undo
 
@@ -394,9 +439,11 @@ secure store); consona only holds them in memory.
 | `internal/identity` | `consona init`: username + device id |
 | `internal/localindex` | registered folders of this device |
 | `internal/source/local` | `Source`: registered folders, content-hash versions |
+| `internal/packmap` | the folder map: name -> GitHub repo folder (`folder-map.json`) |
+| `internal/source/ghfolder` | `Source`: packages that are folders inside GitHub repos |
 | `internal/source/sshremote` | `Source`: other devices over ssh (`remote-serve` protocol, ssh-config discovery, list cache) |
 | `internal/source/chain` | resolution order local > ssh > GitHub, resolution events |
-| `internal/localcli` | CLI for init/register/remote/which |
+| `internal/localcli` | CLI for init/register/remote/map/which |
 | `internal/builder/npmpack` | `Builder`: npm tarball via `npm pack` |
 | `internal/adapter/npm` | `Adapter`: npmrc setup, npm registry protocol, login lookup, `npm` wrapper |
 | `internal/daemon` | loopback server mounting each adapter at `/<name>/`, auto-start |
