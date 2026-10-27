@@ -117,3 +117,41 @@ func TestNpmArgs(t *testing.T) {
 		t.Errorf("env loglevel: %v", got)
 	}
 }
+
+func TestBuildCacheRemoteHitSayEvent(t *testing.T) {
+	buf := captureSay(t, false)
+	sayEvent(logstore.Entry{
+		Event:      logstore.EvBuildCacheRemoteHit,
+		Level:      "info",
+		Package:    "@acme/ui",
+		Version:    "1.2.0",
+		CommitSHA:  "abc123456789",
+		DurationMS: 800,
+		Fields: map[string]any{
+			"remote": "laptop",
+			"took":   "0.8s",
+		},
+	})
+	out := strings.TrimSpace(buf.String())
+	want := "consona: build cache: got @acme/ui@1.2.0 (abc1234) from ssh remote laptop in 0.8s"
+	if out != want {
+		t.Fatalf("got %q, want %q", out, want)
+	}
+
+	bufQuiet := captureSay(t, true)
+	sayEvent(logstore.Entry{
+		Event:      logstore.EvBuildCacheRemoteHit,
+		Level:      "info",
+		Package:    "@acme/ui",
+		Version:    "1.2.0",
+		CommitSHA:  "abc123456789",
+		DurationMS: 800,
+		Fields: map[string]any{
+			"remote": "laptop",
+			"took":   "0.8s",
+		},
+	})
+	if bufQuiet.Len() != 0 {
+		t.Fatalf("quiet mode should suppress output, got: %s", bufQuiet.String())
+	}
+}

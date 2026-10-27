@@ -293,7 +293,7 @@ check "nonexistent private name exits non-zero (rc=$rc)" test $rc -ne 0
 check "clear consona message" grep -q "^consona: @$OWNER/consona-e2e-does-not-exist is private" "$TMP/neg.out"
 grep "^consona:" "$TMP/neg.out" | sed 's/^/      | /'
 check "no registry.npmjs.org request for the private name" \
-  bash -c "! grep -i 'registry.npmjs.org' '$TMP/neg.out' | grep -q 'does-not-exist'"
+  bash -c "! grep -v '^consona: running:' '$TMP/neg.out' | grep -i 'registry.npmjs.org' | grep -q 'does-not-exist'"  # consona's own 'running: npm install ... via registry.npmjs.org' line is not a request
 check "package.json unchanged" cmp -s "$TMP/pkg.before" "$TMP/app/package.json"
 
 echo "== daemon down: npm fails closed and fast (default retries, no extra flags)"

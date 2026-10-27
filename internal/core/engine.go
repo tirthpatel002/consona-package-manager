@@ -2,6 +2,10 @@ package core
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,9 +33,10 @@ var BuildTimeout = 10 * time.Minute
 // Engine resolves a package through a Source and builds it with a Builder,
 // caching artifacts on disk keyed by commit SHA (and published version).
 type Engine struct {
-	Source   Source
-	CacheDir string
-	TTL      time.Duration // how long a resolved version list is reused
+	Source      Source
+	CacheDir    string
+	TTL         time.Duration // how long a resolved version list is reused
+	RemoteCache RemoteCache
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
@@ -168,7 +173,10 @@ func (e *Engine) cached(b Builder, ref Ref, commit, version string) *Built {
 	dir := filepath.Join(e.base(b, ref), commit, version)
 	var a Artifact
 	if bs, err := os.ReadFile(filepath.Join(dir, "artifact.json")); err == nil && json.Unmarshal(bs, &a) == nil {
-		return &Built{Artifact: &a, Path: filepath.Join(dir, a.File)}
+		p := filepath.Join(dir, a.File)
+		if _, err := os.Stat(p); err == nil {
+			return &Built{Artifact: &a, Path: p}
+		}
 	}
 	return nil
 }
@@ -192,10 +200,19 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 	var art *Artifact
 	started := time.Now()
 	ev := logstore.Entry{Ecosystem: b.Ecosystem(), Package: name, Owner: ref.Owner, Repo: ref.Name, Version: v.Version, CommitSHA: v.Revision.Commit}
+	if v.Revision.Tag != "" {
+		ev.Fields = map[string]any{"tag": v.Revision.Tag} // shown by consona why/report
+	}
 	prebuilt := false
 	var err error
 	if pb, ok := e.Source.(Prebuilt); ok {
 		art, prebuilt, err = pb.FetchPrebuilt(ctx, ref, v.Revision, dir)
+	}
+	if !prebuilt && err == nil && v.Info != nil && v.Info.NeedsBuild {
+		if rart, hit := e.tryRemoteCache(ctx, b, ref, name, v, dir); hit {
+			art = rart
+			prebuilt = true
+		}
 	}
 	if !prebuilt && err == nil {
 		if v.Info != nil && v.Info.NeedsBuild {
@@ -246,6 +263,146 @@ func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *
 		return nil, err
 	}
 	return &Built{Artifact: art, Path: filepath.Join(dir, art.File)}, nil
+}
+
+func (e *Engine) tryRemoteCache(ctx context.Context, b Builder, ref Ref, name string, v *Version, dir string) (*Artifact, bool) {
+	if e.RemoteCache == nil || v.Revision.Commit == "" || v.Info == nil || !v.Info.NeedsBuild {
+		return nil, false
+	}
+	key := BuildCacheKey(b.Ecosystem(), ref.Owner, ref.Name, v.Revision.Commit, v.Version)
+	if _, _, _, _, _, _, err := ValidateCacheKey(key); err != nil {
+		return nil, false
+	}
+	tmpPath := filepath.Join(dir, ".remote-cache.tmp")
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+
+	res, ok, err := e.RemoteCache.Fetch(ctx, key, tmpPath)
+	if err != nil {
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvBuildCacheRemoteError,
+			Level:     "debug",
+			Ecosystem: b.Ecosystem(),
+			Package:   name,
+			Owner:     ref.Owner,
+			Repo:      ref.Name,
+			Version:   v.Version,
+			CommitSHA: v.Revision.Commit,
+			Result:    "error",
+			ErrorCode: "remote_fetch_failed",
+			Message:   err.Error(),
+		})
+		return nil, false
+	}
+	if !ok {
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvBuildCacheRemoteMiss,
+			Level:     "debug",
+			Ecosystem: b.Ecosystem(),
+			Package:   name,
+			Owner:     ref.Owner,
+			Repo:      ref.Name,
+			Version:   v.Version,
+			CommitSHA: v.Revision.Commit,
+			Result:    "miss",
+			Message:   "not found in remote build cache",
+		})
+		return nil, false
+	}
+
+	data, rerr := os.ReadFile(tmpPath)
+	if rerr != nil {
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvBuildCacheRemoteError,
+			Level:     "debug",
+			Ecosystem: b.Ecosystem(),
+			Package:   name,
+			Owner:     ref.Owner,
+			Repo:      ref.Name,
+			Version:   v.Version,
+			CommitSHA: v.Revision.Commit,
+			Result:    "error",
+			ErrorCode: "read_error",
+			Message:   rerr.Error(),
+		})
+		return nil, false
+	}
+
+	sum512 := sha512.Sum512(data)
+	computed512 := base64.StdEncoding.EncodeToString(sum512[:])
+	if res.SHA512 == "" || computed512 != res.SHA512 {
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvBuildCacheRemoteError,
+			Level:     "debug",
+			Ecosystem: b.Ecosystem(),
+			Package:   name,
+			Owner:     ref.Owner,
+			Repo:      ref.Name,
+			Version:   v.Version,
+			CommitSHA: v.Revision.Commit,
+			Result:    "error",
+			ErrorCode: "sha512_mismatch",
+			Message:   fmt.Sprintf("remote %s announced sha512 %s, computed %s", res.RemoteLabel, res.SHA512, computed512),
+		})
+		return nil, false
+	}
+
+	manifest, terr := InspectTarball(tmpPath, name)
+	if terr != nil {
+		logstore.LogQuiet(logstore.Entry{
+			Event:     logstore.EvBuildCacheRemoteError,
+			Level:     "debug",
+			Ecosystem: b.Ecosystem(),
+			Package:   name,
+			Owner:     ref.Owner,
+			Repo:      ref.Name,
+			Version:   v.Version,
+			CommitSHA: v.Revision.Commit,
+			Result:    "error",
+			ErrorCode: "invalid_tarball",
+			Message:   terr.Error(),
+		})
+		return nil, false
+	}
+
+	sum1 := sha1.Sum(data)
+	computed1 := hex.EncodeToString(sum1[:])
+
+	fileName := ArtifactFileName(b, name, v.Version)
+	destPath := filepath.Join(dir, fileName)
+	if err := writeFileAtomic(destPath, data); err != nil {
+		return nil, false
+	}
+
+	art := &Artifact{
+		Version:  v.Version,
+		File:     fileName,
+		Manifest: json.RawMessage(manifest),
+		SHA1:     computed1,
+		SHA512:   computed512,
+	}
+
+	tookStr := fmt.Sprintf("%.1fs", res.Duration.Seconds())
+	logstore.Log(logstore.Entry{
+		Event:      logstore.EvBuildCacheRemoteHit,
+		Level:      "info",
+		Ecosystem:  b.Ecosystem(),
+		Package:    name,
+		Owner:      ref.Owner,
+		Repo:       ref.Name,
+		Version:    v.Version,
+		CommitSHA:  v.Revision.Commit,
+		Result:     "ok",
+		DurationMS: res.Duration.Milliseconds(),
+		Fields: map[string]any{
+			"remote": res.RemoteLabel,
+			"size":   res.Size,
+			"took":   tookStr,
+		},
+		Message: fmt.Sprintf("got %s@%s (%.7s) from ssh remote %s in %s", name, v.Version, v.Revision.Commit, res.RemoteLabel, tookStr),
+	})
+
+	return art, true
 }
 
 // withSource fetches commit into a temp dir, runs f, and removes the dir.

@@ -162,7 +162,7 @@ lane_finish() {   # logs + credential checks common to all lanes; $1 = packages 
 lane_resolve() {
   lane_init resolve 0
   local P=$O/consona-fx-many-tags
-  app view; npm view "$P" versions --json > "$L/mt-versions.out" 2>&1
+  app view; npm view "$P" versions --json > "$L/mt-versions.out" 2> "$L/mt-versions.err"  # npm logs (consona sets loglevel) stay out of the JSON
   expect "many-tags: versions listed" '["1.0.0","1.1.0","1.2.3","2.0.0","2.1.0-beta.1"]' "$(node -p 'JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1])))' "$L/mt-versions.out" 2>/dev/null)"
   expect "many-tags: dist-tags" '{"latest":"2.0.0"}' "$(npm view "$P" dist-tags --json 2>/dev/null | node -p 'JSON.stringify(JSON.parse(require("fs").readFileSync(0)))')"
   local spec want i=0
@@ -251,10 +251,10 @@ lane_pkg() {
   local B=$O/consona-fx-bin
   app bin "{\"$B\": \"^1.0.0\"}"; npmi bin install
   expect "bin: node_modules/.bin/consona-fx-bin" "CONSONA_FX_BIN_OK v1.0.0" "$(./node_modules/.bin/consona-fx-bin 2>&1)"
-  expect "bin: npx consona-fx-bin (installed)" "CONSONA_FX_BIN_OK v1.0.0" "$(npx --no-install consona-fx-bin 2>&1 | tail -1)"
+  expect "bin: npx consona-fx-bin (installed)" "CONSONA_FX_BIN_OK v1.0.0" "$(npx --no-install consona-fx-bin 2>> "$L/npx.err" | tail -1)"
   ok "bin: target is executable" "bin/cli.js mode +x" test -x "node_modules/$B/bin/cli.js"
   mkdir -p "$L/apps/npxonly"; cd "$L/apps/npxonly"
-  expect "bin: npx -y $B (not installed)" "CONSONA_FX_BIN_OK v1.0.0" "$(tmo 120 npx -y "$B" 2>&1 | tail -1)"
+  expect "bin: npx -y $B (not installed)" "CONSONA_FX_BIN_OK v1.0.0" "$(tmo 120 npx -y "$B" 2>> "$L/npx.err" | tail -1)"
 
   local E=$O/consona-fx-esm
   app esm "{\"$E\": \"^1.0.0\"}"; npmi esm install
@@ -389,7 +389,7 @@ lane_lock() {
   npmi reinstall install; rc=$?
   expect "lock: prepare-build integrity after a 2nd npm install (unchanged)" "rc=0 $(node -p 'require(process.argv[1]).packages["node_modules/'"$PB"'"].integrity||"MISSING"' "$L/lock.orig.json" | cut -c1-24)" "rc=$rc $(node -p 'require("./package-lock.json").packages["node_modules/'"$PB"'"].integrity||"MISSING"' | cut -c1-24)"
   npmi audit-real audit --json; rc=$?
-  local vul; vul=$(node -p 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));JSON.stringify(a.metadata&&a.metadata.vulnerabilities&&a.metadata.vulnerabilities.total)' "$L/audit-real.out" 2>/dev/null)
+  local vul; vul=$(grep -v '^npm \|^consona: ' "$L/audit-real.out" | node -p 'const a=JSON.parse(require("fs").readFileSync(0,"utf8"));JSON.stringify(a.metadata&&a.metadata.vulnerabilities&&a.metadata.vulnerabilities.total)' 2>/dev/null)  # drop npm/consona log lines around the JSON
   res "audit: npm audit (registry.npmjs.org upstream)" "$( [ $rc -eq 0 ] && [ "$vul" = 0 ] && echo PASS || echo FAIL)" "rc=0, 0 vulnerabilities, private names withheld" "rc=$rc total=$vul; $("$BIN" logs --event audit --limit 5 2>/dev/null | grep -o 'forwarding [0-9]* public package names, withheld [0-9]* private' | tail -1)"
   lane_finish "consona-fx-many-tags consona-fx-chain-1 consona-fx-chain-2 consona-fx-chain-3 consona-e2e-lib-b consona-fx-prepare-build consona-fx-esm consona-fx-bin consona-fx-no-v-tags"
 }

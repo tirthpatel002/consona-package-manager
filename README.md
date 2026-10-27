@@ -68,6 +68,32 @@ npm install @your-github-name/your-repo
 - `consona install` is `npm install` that also prefetches private packages
   in parallel; it is a little faster but optional.
 
+### New: lookalike guard, why/report, ci, dev, shared build cache, pnpm
+
+Full examples, assumptions and sample output: [docs/new-features.md](docs/new-features.md).
+
+- **Lookalike-name guard:** consona warns when a private name also exists on
+  the public npm registry (a dependency-confusion risk). `consona check [dir]
+  [--json]` audits a project; `CONSONA_STRICT=1` refuses to serve such names.
+- **Provenance:** `consona why @scope/pkg [--json]` shows where an installed
+  private package came from (source, repo, commit, tag, build time,
+  integrity); `consona report [--json] [--out FILE]` does it for the whole
+  lockfile. Both are read-only and offline.
+- **CI:** `consona ci [npm ci args...]` runs `npm ci` with a temporary daemon,
+  a temporary npmrc and full cleanup; it reads scopes and the port from
+  `package-lock.json`. GitHub Actions: `uses: ./.github/actions/consona-ci`
+  with a token in `env` (e.g. `CONSONA_TOKEN`).
+- **Live local development:** `consona dev @scope/pkg` watches a registered
+  local folder, rebuilds it and syncs it into the `node_modules` of projects
+  that installed it (`--once`, `--project DIR`, `--list`).
+- **Shared build cache:** packages that need a build are fetched already built
+  from your SSH remotes when one has them (verified by sha512), else built
+  locally. `consona cache list [--json]` and `consona cache prune
+  [--older-than 7d] [--dry-run]` manage the local cache.
+- **pnpm:** `consona install` / `consona audit` run pnpm when the project uses
+  it (`packageManager` in package.json, or `pnpm-lock.yaml`); override with
+  `--pm npm|pnpm` or `CONSONA_PM`.
+
 ## GitHub credentials
 
 consona uses whatever credential is available and falls through to the

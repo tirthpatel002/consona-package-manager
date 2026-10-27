@@ -19,9 +19,10 @@ const Protocol = "consona-remote/1"
 
 // Request is one line from the client.
 type Request struct {
-	Op      string `json:"op"` // hello | list | resolve | fetch
+	Op      string `json:"op"` // hello | list | resolve | fetch | cache_fetch | cache_has
 	Name    string `json:"name,omitempty"`
 	Version string `json:"version,omitempty"`
+	Key     string `json:"key,omitempty"`
 }
 
 // Summary is a registered package in a list answer.

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 // Ref identifies a private package by its code location. For GitHub the
@@ -86,6 +87,22 @@ type Builder interface {
 	// Build produces the artifact. Failures should be *BuildError when the
 	// package's own build step failed, so its output can be shown.
 	Build(ctx context.Context, srcDir string, req BuildRequest) (*Artifact, error)
+}
+
+// ArtifactNamer is an optional interface that a Builder can implement
+// to provide the canonical artifact file name for a given package name and version.
+type ArtifactNamer interface {
+	FileName(name, version string) string
+}
+
+// ArtifactFileName returns the artifact file name Builder b produces for name and version.
+// If b implements ArtifactNamer, it calls b.FileName; otherwise it falls back to
+// the standard npm format (same as npmpack.FileName).
+func ArtifactFileName(b Builder, name, version string) string {
+	if an, ok := b.(ArtifactNamer); ok {
+		return an.FileName(name, version)
+	}
+	return strings.NewReplacer("@", "", "/", "-").Replace(name) + "-" + version + ".tgz"
 }
 
 // BuildError is a failure of the package's own build step.

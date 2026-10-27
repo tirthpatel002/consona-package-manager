@@ -1,0 +1,151 @@
+# ==============================================================================
+# consona-ci GitHub Action
+#
+# Runs `npm ci` with a temporary local consona daemon for private GitHub packages.
+#
+# Usage Example:
+#   - name: Install dependencies with consona
+#     uses: ./.github/actions/consona-ci
+#     with:
+#       scopes: '@myorg, @shared'
+#       npm-args: '--ignore-scripts'
+#     env:
+#       # Set a token with repo read permissions for private packages.
+#       # Credentials come from the standard chain: CONSONA_TOKEN, GH_TOKEN, or GITHUB_TOKEN.
+#       CONSONA_TOKEN: ${{ secrets.CONSONA_TOKEN || secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+#
+# In CI, consona automatically discovers private scopes and daemon ports from
+# package-lock.json resolved URLs (pointing at 127.0.0.1:<port>/npm/).
+# Any additional scopes can be passed via the `scopes` input or `CONSONA_SCOPES` env.
+# ==============================================================================
+
+name: 'consona-ci'
+description: 'Run npm ci using a temporary consona daemon for private GitHub packages'
+author: 'consona'
+
+inputs:
+  version:
+    description: 'Release tag of consona to install (e.g. v0.10.0 or latest)'
+    required: false
+    default: 'latest'
+  binary-url:
+    description: 'Optional direct download URL for the consona binary or release directory'
+    required: false
+    default: ''
+  build-from-source:
+    description: 'Whether to build consona from source using actions/setup-go'
+    required: false
+    default: 'false'
+  npm-args:
+    description: 'Optional extra arguments passed to npm ci (e.g. --production, --ignore-scripts)'
+    required: false
+    default: ''
+  scopes:
+    description: 'Optional private package scopes to route to consona (comma-separated or @name)'
+    required: false
+    default: ''
+  working-directory:
+    description: 'Working directory containing package-lock.json'
+    required: false
+    default: '.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Go (build from source)
+      if: inputs.build-from-source == 'true'
+      uses: actions/setup-go@v5
+      with:
+        go-version: '>=1.22'
+        cache: false
+
+    - name: Build consona from source
+      if: inputs.build-from-source == 'true'
+      shell: bash
+      run: |
+        INSTALL_DIR="${RUNNER_TEMP}/consona/bin"
+        mkdir -p "$INSTALL_DIR"
+        VER="${{ inputs.version }}"
+        if [ "$VER" = "latest" ]; then
+          VER="dev"
+        fi
+        echo "Building consona from source (version: $VER)..."
+        go build -trimpath -ldflags "-s -w -X main.version=$VER" -o "$INSTALL_DIR/consona" ./cmd/consona
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Install consona
+      if: inputs.build-from-source != 'true'
+      shell: bash
+      run: |
+        INSTALL_DIR="${RUNNER_TEMP}/consona/bin"
+        mkdir -p "$INSTALL_DIR"
+
+        BINARY_URL="${{ inputs.binary-url }}"
+        VERSION="${{ inputs.version }}"
+
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64|amd64) ARCH="amd64" ;;
+          aarch64|arm64) ARCH="arm64" ;;
+          *) echo "::error::Unsupported CPU architecture: $ARCH"; exit 1 ;;
+        esac
+
+        EXT=""
+        if [ "$OS" = "windows" ] || [ "$OS" = "mingw64_nt" ] || [ "$OS" = "msys_nt" ]; then
+          OS="windows"
+          EXT=".exe"
+        fi
+
+        if [ -n "$BINARY_URL" ]; then
+          echo "Downloading consona from $BINARY_URL..."
+          curl -fsSL "$BINARY_URL" -o "$INSTALL_DIR/consona$EXT"
+        else
+          REPO="tirthpatel002/consona-package-manager"
+          if [ "$VERSION" = "latest" ]; then
+            BASE_URL="https://github.com/${REPO}/releases/latest/download"
+            CLEAN_VER="latest"
+          else
+            case "$VERSION" in
+              v*) TAG="$VERSION"; CLEAN_VER="${VERSION#v}" ;;
+              *) TAG="v$VERSION"; CLEAN_VER="$VERSION" ;;
+            esac
+            BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          fi
+
+          echo "Installing consona $VERSION for $OS/$ARCH..."
+          # Try install.sh first; fall back to direct release asset download
+          if ! curl -fsSL "${BASE_URL}/install.sh" | sh -s -- --base-url "$BASE_URL" --dir "$INSTALL_DIR" 2>/dev/null; then
+            ASSET_URL="${BASE_URL}/consona_${CLEAN_VER}_${OS}_${ARCH}${EXT}"
+            if ! curl -fsSL "$ASSET_URL" -o "$INSTALL_DIR/consona$EXT" 2>/dev/null; then
+              curl -fsSL "https://github.com/${REPO}/releases/latest/download/consona_${OS}_${ARCH}${EXT}" -o "$INSTALL_DIR/consona$EXT"
+            fi
+          fi
+        fi
+
+        chmod +x "$INSTALL_DIR/consona$EXT" 2>/dev/null || true
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Run consona ci
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONSONA_INPUT_SCOPES: ${{ inputs.scopes }}
+        CONSONA_INPUT_NPM_ARGS: ${{ inputs.npm-args }}
+      run: |
+        ARGS=()
+        if [ -n "$CONSONA_INPUT_SCOPES" ]; then
+          IFS=',' read -ra SCOPE_LIST <<< "$CONSONA_INPUT_SCOPES"
+          for s in "${SCOPE_LIST[@]}"; do
+            s_clean=$(echo "$s" | tr -d ' ')
+            if [ -n "$s_clean" ]; then
+              ARGS+=(--scope "$s_clean")
+            fi
+          done
+        fi
+
+        if [ -n "$CONSONA_INPUT_NPM_ARGS" ]; then
+          consona ci "${ARGS[@]}" $CONSONA_INPUT_NPM_ARGS
+        else
+          consona ci "${ARGS[@]}"
+        fi

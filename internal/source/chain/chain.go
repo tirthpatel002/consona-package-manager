@@ -258,6 +258,14 @@ func (c *Chain) FetchPrebuilt(ctx context.Context, ref core.Ref, rev core.Revisi
 	return c.Remotes.FetchPrebuilt(ctx, ref, rev, outDir)
 }
 
+// RemoteCache provides access to the shared build cache over SSH remotes.
+func (c *Chain) RemoteCache() core.RemoteCache {
+	if c.Remotes == nil {
+		return nil
+	}
+	return c.Remotes
+}
+
 // PrivateScopes are scopes consona must treat as private besides those in
 // the npmrc: registered folders' scopes and scopes seen on remotes.
 func (c *Chain) PrivateScopes() map[string]bool {

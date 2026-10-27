@@ -10,13 +10,16 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/tirthpatel002/consona-package-manager/internal/builder/npmpack"
 	"github.com/tirthpatel002/consona-package-manager/internal/core"
+	"github.com/tirthpatel002/consona-package-manager/internal/devsync"
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
+	"github.com/tirthpatel002/consona-package-manager/internal/lookalike"
 )
 
 // Handler is npm's registry (setup points npm's `registry` here):
@@ -47,7 +50,8 @@ type handler struct {
 	warmMu  sync.Mutex
 	warmed  map[string]time.Time // package name -> when it was last warmed
 
-	buildWait time.Duration // 0: BuildWait() (see awaitLatest); <0: never wait
+	buildWait time.Duration      // 0: BuildWait() (see awaitLatest); <0: never wait
+	lookalike *lookalike.Checker // tests only; default lookalike.Default()
 }
 
 // authFor is the Authorization to send upstream. npm holds a placeholder
@@ -241,6 +245,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p := h.e.FindCached(h.b, ref, file); p != "" { // e.g. remote offline: a built tarball is still good
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, p)
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		h.fail(w, ref, name, err)
@@ -263,6 +268,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, bl.Path)
 			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 				Repo: ref.Name, Version: p.Version, CommitSHA: p.Revision.Commit, Result: "ok", DurationMS: time.Since(start).Milliseconds()})
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		// A version the source no longer lists (a local folder changed
@@ -270,6 +276,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p := h.e.FindCached(h.b, ref, file); p != "" {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, p)
+			h.trackDevProject(r, name, ref)
 			return
 		}
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
@@ -279,6 +286,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		go h.warmDeps(name, pkgs, scopes)
 	}
 	h.checkName(ref, name, latest(pkgs))
+	if h.checkLookalike(r, w, ref, name) {
+		return
+	}
 	pkgs = h.awaitLatest(r.Context(), ref, name, pkgs)
 	body, err := Packument(name, h.base, pkgs)
 	if err != nil {
@@ -293,8 +303,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	contentType := "application/json"
+	if strings.Contains(r.Header.Get("Accept"), "application/vnd.npm.install-v1+json") {
+		contentType = "application/vnd.npm.install-v1+json"
+	}
+	w.Header().Set("Content-Type", contentType)
 	_, _ = w.Write(body)
+	// Track the project on the packument too: npm often takes a local
+	// package tarball from its own cache (the npm pack of the build fills
+	// it), so the tarball request alone misses projects for consona dev.
+	h.trackDevProject(r, name, ref)
 	logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallResolve, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 		Repo: ref.Name, Result: "ok", DurationMS: time.Since(start).Milliseconds(), Fields: map[string]any{"versions": len(pkgs)}})
 }
@@ -380,4 +398,81 @@ func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 		"dist-tags": map[string]string{"latest": core.Latest(list)},
 		"versions":  versions,
 	})
+}
+
+func (h *handler) lookalikeChecker() *lookalike.Checker {
+	if h.lookalike != nil {
+		return h.lookalike
+	}
+	return lookalike.Default()
+}
+
+func isStrict(r *http.Request) bool {
+	if v := os.Getenv("CONSONA_STRICT"); v == "1" || strings.EqualFold(v, "true") {
+		return true
+	}
+	if c, ok := clientFor(r); ok && c != nil {
+		if v := c.getenv("CONSONA_STRICT"); v == "1" || strings.EqualFold(v, "true") {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *handler) checkLookalike(r *http.Request, w http.ResponseWriter, ref core.Ref, name string) bool {
+	status := h.lookalikeChecker().Check(r.Context(), name)
+	if status != lookalike.StatusExists {
+		return false
+	}
+	regHost := lookalike.RegistryHost(lookalike.PublicRegistry())
+	msg := fmt.Sprintf("%s also exists on the public npm registry (%s): a typo in your scope config or a missing scope route would install the public one; consona serves the private one", name, regHost)
+	core.Warn("lookalike|"+name, logstore.Entry{
+		Event:     logstore.EvPublicLookalike,
+		Level:     "warn",
+		Ecosystem: "npm",
+		Package:   name,
+		Owner:     ref.Owner,
+		Repo:      ref.Name,
+		Result:    "lookalike",
+		Message:   msg,
+	})
+	if isStrict(r) {
+		errMsg := fmt.Sprintf("consona: CONSONA_STRICT=1 is set and %s also exists on the public npm registry (%s) (potential dependency confusion); refusing to serve private package", name, regHost)
+		h.e.ReportError(errMsg)
+		logstore.Log(logstore.Entry{
+			Event:      logstore.EvError,
+			Level:      "error",
+			Ecosystem:  "npm",
+			Package:    name,
+			Owner:      ref.Owner,
+			Repo:       ref.Name,
+			Result:     "fail",
+			HTTPStatus: http.StatusForbidden,
+			ErrorCode:  "lookalike-strict",
+			Message:    errMsg,
+		})
+		jsonErr(w, http.StatusForbidden, errMsg)
+		return true
+	}
+	return false
+}
+
+func (h *handler) trackDevProject(r *http.Request, name string, ref core.Ref) {
+	if !h.e.Live(ref) {
+		return
+	}
+	c, same := clientFor(r)
+	if !same || c == nil {
+		return
+	}
+	projectDir := ""
+	if p := c.getenv("npm_config_local_prefix"); p != "" {
+		projectDir = p
+	} else {
+		projectDir = c.cwd
+	}
+	if projectDir == "" {
+		return
+	}
+	_ = devsync.TrackProject(core.Home(), name, projectDir)
 }

@@ -25,6 +25,9 @@ type Live interface {
 	Live(ref Ref) bool
 }
 
+// Live reports whether ref comes from a live source (such as a local registered folder).
+func (e *Engine) Live(ref Ref) bool { return e.live(ref) }
+
 func (e *Engine) live(ref Ref) bool {
 	l, ok := e.Source.(Live)
 	return ok && l.Live(ref)

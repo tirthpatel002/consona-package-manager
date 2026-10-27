@@ -137,6 +137,69 @@ func TestPackumentAndTarballIntegrity(t *testing.T) {
 	}
 }
 
+func TestPackumentAcceptHeader(t *testing.T) {
+	srv, _ := newServer(t)
+
+	// 1. Abbreviated / install-v1 corgi format
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/@o%2flib", nil)
+	req.Header.Set("Accept", "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("packument: %v %v", err, resp.Status)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "application/vnd.npm.install-v1+json" {
+		t.Errorf("got Content-Type %q; want application/vnd.npm.install-v1+json", got)
+	}
+
+	// 2. Full JSON format
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/@o%2flib", nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("packument: %v %v", err, resp.Status)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("got Content-Type %q; want application/json", got)
+	}
+}
+
+func TestPnpmBulkAuditForwarding(t *testing.T) {
+	routeScope(t, "privateowner")
+	var upstreamPayload map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != bulkPath {
+			t.Errorf("got path %q, want %q", r.URL.Path, bulkPath)
+		}
+		json.NewDecoder(r.Body).Decode(&upstreamPayload)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ms":[{"id":123}]}`))
+	}))
+	defer up.Close()
+
+	h := &handler{e: core.NewEngine(&fakeSource{}, t.TempDir()), b: fakeBuilder{}, upstreamURL: up.URL, noWarm: true}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	pnpmPayload := `{"@privateowner/lib":["1.0.0"],"ms":["2.1.3"]}`
+	resp, err := http.Post(srv.URL+bulkPath, "application/json", strings.NewReader(pnpmPayload))
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("audit post failed: %v, status: %d", err, resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "123") {
+		t.Errorf("expected relayed response from upstream, got %s", body)
+	}
+	if _, hasPrivate := upstreamPayload["@privateowner/lib"]; hasPrivate {
+		t.Errorf("upstream received private package: %v", upstreamPayload)
+	}
+	if _, hasPublic := upstreamPayload["ms"]; !hasPublic {
+		t.Errorf("upstream missing public package 'ms': %v", upstreamPayload)
+	}
+}
+
 // A routed private name that does not exist is a clear 404 and is never
 // looked up anywhere else (the handler has no upstream to fall back to).
 // Credential failures reach npm as a 403 (not retried) whose message names
