@@ -51,7 +51,8 @@ install and audit then also run npm without --verbose.
 
 GitHub credentials (any one is enough; gh is supported but not required):
 per-owner env CONSONA_TOKEN_<OWNER>, named tokens ("consona token add"),
-CONSONA_TOKEN, GH_TOKEN, GITHUB_TOKEN, a default named token, the gh login.
+CONSONA_TOKEN, GH_TOKEN, GITHUB_TOKEN, a default named token, every gh account
+(the one named like the owner first; gh's active account is never changed).
 "consona token help" shows the full order.
 
 After setup every npm command asks consona first. If the daemon is not running,
@@ -135,7 +136,7 @@ func run(args []string) int {
 			}
 		}
 		src := github.New()
-		say("finding your GitHub owners (credential order: CONSONA_TOKEN_<OWNER>, named tokens, CONSONA_TOKEN, GH_TOKEN, GITHUB_TOKEN, gh login)")
+		say("finding your GitHub owners (credential order: CONSONA_TOKEN_<OWNER>, named tokens, CONSONA_TOKEN, GH_TOKEN, GITHUB_TOKEN, gh accounts)")
 		owners, err := src.Owners(ctx)
 		if err == nil {
 			say("GitHub owners: @%s", strings.Join(owners, ", @"))

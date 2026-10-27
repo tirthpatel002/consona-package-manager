@@ -34,6 +34,101 @@ type Source struct {
 	mu        sync.Mutex
 	pref      map[string]string // owner -> source label that last worked
 	redirects map[string]string // "owner/repo" (lower) -> the repo's current full name, once seen redirected
+	probeMu   sync.Mutex
+	announced map[string]time.Time // "owner/repo|source" -> last credential.resolve logged for a gh account
+}
+
+// announceEvery is how often the gh account used for a repo is logged
+// again (so each install's verbose output says which account it used).
+var announceEvery = 30 * time.Second
+
+// announce reports whether the gh account c used for owner/repo should be
+// logged again.
+func (s *Source) announce(owner, repo, source string) bool {
+	if !strings.HasPrefix(source, "gh account ") {
+		return false
+	}
+	k := strings.ToLower(owner+"/"+repo) + "|" + source
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t, ok := s.announced[k]; ok && s.now().Sub(t) < announceEvery && s.now().Sub(t) >= 0 {
+		return false
+	}
+	if s.announced == nil {
+		s.announced = map[string]time.Time{}
+	}
+	s.announced[k] = s.now()
+	return true
+}
+
+// announceGH logs (daemon log, log store, live verbose output) which gh
+// account read owner/repo and why.
+func (s *Source) announceGH(owner, repo string, c creds.Candidate, why string, status int) {
+	if c.Kind != "gh" || c.Name == "" {
+		return
+	}
+	what := "@" + creds.NormOwner(owner)
+	if repo != "" {
+		what += "/" + strings.ToLower(repo)
+	}
+	logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "info", Owner: owner, Repo: repo,
+		CredentialSource: c.Source, Result: "ok", HTTPStatus: status,
+		Message: fmt.Sprintf("%s via gh account %s (%s)", what, c.Name, why),
+		Fields:  map[string]any{"gh_account": c.Name, "why": why}})
+}
+
+// needGHProbe: several gh accounts, none matching the owner or
+// remembered for it, so which one to use is found by probing once.
+func needGHProbe(all []creds.Candidate) bool {
+	n := 0
+	for _, c := range all {
+		if c.Kind != "gh" || c.Name == "" || c.Value == "" {
+			continue
+		}
+		if c.Why == creds.WhyOwnerMatch || c.Why == creds.WhyRemembered {
+			return false
+		}
+		n++
+	}
+	return n >= 2
+}
+
+// probeGH asks GET /repos/owner/repo with each gh account (active one
+// first) and remembers the first that can see it. "" if none can.
+func (s *Source) probeGH(ctx context.Context, owner, repo string, all []creds.Candidate) string {
+	s.probeMu.Lock() // concurrent requests for one owner probe once
+	defer s.probeMu.Unlock()
+	if again := s.Creds.Candidates(owner); !needGHProbe(again) {
+		for _, c := range again {
+			if c.Why == creds.WhyRemembered {
+				return c.Name
+			}
+		}
+		return ""
+	}
+	var tried []string
+	for _, c := range all {
+		if c.Kind != "gh" || c.Name == "" || c.Value == "" {
+			continue
+		}
+		resp, err := s.do(ctx, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo), "application/vnd.github+json", c.Value)
+		if err != nil {
+			return ""
+		}
+		resp.Body.Close()
+		tried = append(tried, fmt.Sprintf("%s: %d", c.Name, resp.StatusCode))
+		if resp.StatusCode/100 == 2 {
+			_ = s.Creds.GHMap.Set(owner, c.Name)
+			s.Creds.InvalidateOwner(owner)
+			logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "debug", Owner: owner, Repo: repo,
+				CredentialSource: c.Source, Result: "ok", HTTPStatus: resp.StatusCode,
+				Message: "probed gh accounts for " + owner + "/" + repo + " (" + strings.Join(tried, ", ") + "): using " + c.Name})
+			return c.Name
+		}
+	}
+	logstore.Log(logstore.Entry{Event: logstore.EvCredentialFail, Level: "debug", Owner: owner, Repo: repo, Result: "fail",
+		Message: "no gh account can see " + owner + "/" + repo + " (" + strings.Join(tried, ", ") + ")"})
+	return ""
 }
 
 // New returns a Source using the default credential resolver. It never
@@ -72,6 +167,12 @@ func (s *Source) do(ctx context.Context, path, accept, tok string) (*http.Respon
 // to the next; when none works the *AccessError lists every attempt.
 func (s *Source) get(ctx context.Context, owner, repo, path, accept string) (*http.Response, error) {
 	all := s.Creds.Candidates(owner)
+	probed := ""
+	if repo != "" && needGHProbe(all) {
+		if probed = s.probeGH(ctx, owner, repo, all); probed != "" {
+			all = s.Creds.Candidates(owner)
+		}
+	}
 	usable := creds.Usable(all)
 	s.mu.Lock()
 	pref := s.pref[strings.ToLower(owner)]
@@ -99,6 +200,23 @@ func (s *Source) get(ctx context.Context, owner, repo, path, accept string) (*ht
 			return nil, err
 		}
 		if resp.StatusCode/100 == 2 {
+			why := c.Why
+			if c.Kind == "gh" && c.Name != "" {
+				if c.Why != creds.WhyOwnerMatch && owner != "" {
+					_ = s.Creds.GHMap.Set(owner, c.Name)
+				}
+				switch {
+				case strings.EqualFold(probed, c.Name):
+					why = "probed: first gh account that can see " + owner + "/" + repo + "; remembered for @" + creds.NormOwner(owner)
+				case c.Why == creds.WhyRemembered:
+					why = "remembered for @" + creds.NormOwner(owner)
+				case len(e.Attempts) > 0:
+					why += fmt.Sprintf(", after %d failed credential(s)", len(e.Attempts))
+				}
+			}
+			if s.announce(owner, repo, c.Source) {
+				s.announceGH(owner, repo, c, why, resp.StatusCode)
+			}
 			if pref != c.Source {
 				s.mu.Lock()
 				if s.pref == nil {
@@ -106,12 +224,14 @@ func (s *Source) get(ctx context.Context, owner, repo, path, accept string) (*ht
 				}
 				s.pref[strings.ToLower(owner)] = c.Source
 				s.mu.Unlock()
-				msg := "using " + c.Source
-				if len(e.Attempts) > 0 {
-					msg += fmt.Sprintf(" after %d failed credential(s)", len(e.Attempts))
+				if c.Kind != "gh" || c.Name == "" {
+					msg := "using " + c.Source
+					if len(e.Attempts) > 0 {
+						msg += fmt.Sprintf(" after %d failed credential(s)", len(e.Attempts))
+					}
+					logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "info", Owner: owner, Repo: repo,
+						CredentialSource: c.Source, Result: "ok", HTTPStatus: resp.StatusCode, Message: msg})
 				}
-				logstore.Log(logstore.Entry{Event: logstore.EvCredentialResolve, Level: "info", Owner: owner, Repo: repo,
-					CredentialSource: c.Source, Result: "ok", HTTPStatus: resp.StatusCode, Message: msg})
 			}
 			if repo != "" {
 				s.checkRedirect(ctx, owner, repo, path, resp, c.Value)
@@ -121,6 +241,14 @@ func (s *Source) get(ctx context.Context, owner, repo, path, accept string) (*ht
 		a := classify(resp, c, owner, repo, s.now())
 		resp.Body.Close()
 		e.Attempts = append(e.Attempts, a)
+		if c.Kind == "gh" && c.Name != "" {
+			if c.Why == creds.WhyRemembered && a.fallThrough() {
+				_ = s.Creds.GHMap.Set(owner, "") // re-probed (by this fallthrough) and re-remembered on success
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				s.Creds.InvalidateGH()
+			}
+		}
 		logstore.Log(logstore.Entry{Event: logstore.EvCredentialFail, Level: "warn", Owner: owner, Repo: repo,
 			CredentialSource: c.Source, Result: "fail", HTTPStatus: a.Status, ErrorCode: a.Kind, Message: a.Detail + ". Fix: " + a.Fix})
 		if !a.fallThrough() {

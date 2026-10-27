@@ -872,7 +872,9 @@ your previous registry.
 For a package from GitHub owner `<owner>`: (1) `CONSONA_TOKEN_<OWNER>`,
 (2) named tokens added `--for @<owner>`, (3) `CONSONA_TOKEN`,
 (4) `GH_TOKEN`, then `GITHUB_TOKEN`, (5) the default named token,
-(6) the gh login. A credential that gets 401, 403/404 or a rate limit is
+(6) every gh account (the one whose login is the owner first, then the one
+remembered for the owner, then the active one, then the rest; gh's active
+account is never changed). A credential that gets 401, 403/404 or a rate limit is
 skipped and the next one tried; the one that worked is used first for
 that owner afterwards. Full details: [GitHub credentials](../README.md#github-credentials).
 
@@ -949,14 +951,26 @@ Without a secure store (headless Linux), `token add` fails and says so.
 **When to use:** you already use the GitHub CLI or a token variable.
 
 ```sh
-gh auth login                      # consona reads the gh login; nothing else to do
+gh auth login                      # consona reads every gh account; nothing else to do
 # or
 export GH_TOKEN="<token>"          # or GITHUB_TOKEN
 ```
 
 **What happens:** any one of them is enough; gh is optional. The
-auto-started daemon uses the gh login and named tokens (not shell
-variables).
+auto-started daemon uses the gh accounts and named tokens (not shell
+variables). With several gh accounts (`gh auth login` again, gh 2.40+),
+consona picks the one whose login is the package owner, or the one it
+probed and remembered for an organisation, without switching gh's active
+account:
+
+```
+$ gh auth status 2>&1 | grep account     # two accounts, your-other-account active
+  ✓ Logged in to github.com account your-other-account (keyring)
+  ✓ Logged in to github.com account your-github-name (keyring)
+$ consona install
+...
+consona: @your-github-name/utils via gh account your-github-name (owner match)
+```
 
 ### 5.5 CI and env-var-only machines
 

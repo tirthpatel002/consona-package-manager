@@ -10,6 +10,7 @@ Detailed examples for the lookalike-name guard, `consona why`/`report`, `consona
 - [consona dev](#dev)
 - [Shared build cache](#build-cache)
 - [pnpm support](#pnpm)
+- [Several gh accounts](#gh-accounts)
 
 <a id="lookalike-guard"></a>
 
@@ -510,3 +511,51 @@ If pnpm is selected but missing from PATH:
 ```text
 consona: pnpm not found; install it (corepack enable / npm i -g pnpm) or use --pm npm
 ```
+
+<a id="gh-accounts"></a>
+
+## Several gh Accounts
+
+**When to use:** `gh` is logged into more than one github.com account (for example a work account active and your own account added with `gh auth login`), and a private package belongs to an account that is not the active one. Before, consona used only the active account and got a 404.
+
+**Assumptions:**
+- gh 2.40 or newer (`gh auth token --user`). With an older gh, consona uses the active gh login only, as before.
+- Explicit credentials (`CONSONA_TOKEN_<OWNER>`, named tokens, `CONSONA_TOKEN`, `GH_TOKEN`/`GITHUB_TOKEN`, the default named token) still come first.
+- consona only reads gh: it never runs `gh auth switch` or writes gh's config.
+
+**Commands:**
+
+```sh
+gh auth status                     # lists every account; one is active
+consona install                    # nothing to configure
+consona logs --event credential    # which account each owner used, and why
+cat ~/.config/consona/gh-accounts.json   # Linux path; the remembered org -> account mapping (no tokens)
+```
+
+**What each part means:**
+- `owner match`: the gh account whose login equals the package owner (case-insensitive) is used first, with no probe and no 404 first.
+- `probed ... remembered for @<owner>`: for an organisation (or any owner that is not a gh login) consona asks `GET /repos/<owner>/<repo>` once with each account, active first, and stores the first that can see it in `gh-accounts.json` in consona's config dir (`~/.config/consona` on Linux, `~/Library/Application Support/consona` on macOS, or `$CONSONA_CONFIG_DIR`). Later requests use it directly; if it stops working the other accounts are tried and the mapping is updated.
+- Accounts are read once a minute at most (and again after a 401), in the daemon's memory only.
+
+**What you'll see:**
+
+```
+consona: @tirthpatel002/gradient via gh account tirthpatel002 (owner match)
+consona: @acme-co/ui via gh account your-other-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
+```
+
+When no account can read the repo, the error lists each one:
+
+```
+  3. gh account your-other-account (active gh account) (gho_…vE2w): 404: acme-co/secret does not exist or this token cannot see it.
+  4. gh account your-github-name (other gh account) (gho_…k9Qd): 404: ...
+```
+
+
+**Names in these examples:** `your-github-name` and `your-other-account` stand for your own gh logins, and `acme-co` for a GitHub organisation you belong to (see the name table at the top of [examples.md](examples.md)). `tirthpatel002/gradient` is a real package. None of them are consona keywords.
+
+**Limitations:**
+- Needs gh 2.40 or newer. With an older gh, only the active gh login is used.
+- The first time consona sees an organisation, it makes one extra GitHub request per gh account to find out which can see it. That happens once per owner, then the remembered account is used.
+- The probe also runs when an explicit credential (1–5 above) would have worked anyway.
+- The `via gh account ...` line is shown at most once per repo every 30 seconds, so an install straight after another may not repeat it.

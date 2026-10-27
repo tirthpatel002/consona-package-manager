@@ -80,6 +80,10 @@ func sayEvent(e logstore.Entry) {
 		say("build cache: got %s@%s (%s) from ssh remote %s in %s", e.Package, e.Version, shortCommit(e.CommitSHA), remote, tookStr)
 		return
 	}
+	if e.Event == logstore.EvCredentialResolve && e.Fields["gh_account"] != nil {
+		say("%s", e.Message) // "@acme/lib via gh account acme (owner match)"
+		return
+	}
 	say("%s", logstore.Human(e))
 }
 

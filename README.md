@@ -106,7 +106,8 @@ from GitHub owner `<owner>` it tries, in order:
 3. `CONSONA_TOKEN`
 4. `GH_TOKEN`, then `GITHUB_TOKEN`
 5. the default named token (`consona token add --default`)
-6. the gh login (`gh auth token`, honouring `GH_CONFIG_DIR`)
+6. every account gh is logged into for github.com (`gh auth token --user <login>`,
+   honouring `GH_CONFIG_DIR`), see [Several gh accounts](#several-gh-accounts)
 
 None of these is required; any one is enough. When a credential gets a 401,
 a 404/403 or a rate limit, the next one is tried, and the one that worked
@@ -123,6 +124,39 @@ consona: @acme/lib is private (scope @acme is routed to consona) but cannot read
   Not available:
     - gh login: gh is not installed (optional)
 ```
+
+<a id="several-gh-accounts"></a>
+**Several gh accounts.** When `gh auth status` shows more than one github.com
+account, consona reads them all (from gh's `hosts.yml` or `gh auth status`,
+with each token from `gh auth token --hostname github.com --user <login>`),
+caches them in memory for a minute (and re-reads them after a 401), and
+picks the account before the request:
+
+- the account whose login equals the package owner (case-insensitive) first,
+  so `@tirthpatel002/gradient` uses the tirthpatel002 account even when
+  another account is active;
+- for an organisation or another owner, the account remembered for that
+  owner; the first time, consona probes `GET /repos/<owner>/<repo>` once with
+  each account (active first) and remembers the first that can see it in
+  `gh-accounts.json` in consona's config dir (owner -> login, no tokens);
+  if it later fails, the others are tried and the mapping follows the one
+  that works;
+- then the active account, then the rest.
+
+consona never runs `gh auth switch` and never writes gh's config: the active
+account stays what you chose. Explicit credentials (1-5 above) still come
+first. Verbose output, the daemon log and `consona logs --event credential`
+say which account was used and why:
+
+```
+consona: @tirthpatel002/gradient via gh account tirthpatel002 (owner match)
+consona: @acme-co/ui via gh account your-other-account (probed: first gh account that can see acme-co/ui; remembered for @acme-co)
+```
+
+If no account can read a repo, the error lists every gh account tried
+(`gh account <login> (<why>) (gho_…abcd): 404 ...`). Needs gh 2.40 or newer
+(multi-account `--user`); with an older gh only the active gh login is used,
+as before.
 
 Specific causes are recognised: bad or revoked tokens (401), expired
 tokens (with the date), private repos the token cannot see (404: repo not

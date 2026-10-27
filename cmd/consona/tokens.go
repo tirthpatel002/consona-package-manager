@@ -402,7 +402,7 @@ func (t *tokenCmd) test(ctx context.Context, args []string) int {
 			items = append(items, item{c, e})
 		}
 		// The general chain; named tokens were handled above.
-		r := &creds.Resolver{Getenv: t.src.Creds.Getenv, GH: t.src.Creds.GH}
+		r := &creds.Resolver{Getenv: t.src.Creds.Getenv, GH: t.src.Creds.GH, GHAccounts: t.src.Creds.GHAccounts}
 		for _, c := range r.Candidates("") {
 			if c.Value == "" {
 				if c.Err != creds.ErrUnset && c.Kind != "named" {
