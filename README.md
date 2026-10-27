@@ -360,11 +360,21 @@ range that admits it (for example `>=0.0.0-0`); `^1.0.0` matches only
 once the repo carries a `v1.x` tag. Tag the repo to give its folders real
 semver. Only the mapped folder is extracted from the commit tarball
 (files outside it never land on disk, though the tarball itself is
-downloaded whole); the cache keys builds by package name, commit and
-version, so after remapping an existing name to different content at the
-same commit, prune the cache (`consona cache`) or bump the commit. A
-mapped name wins over ssh remotes and GitHub repos of the same name; a
-registered local folder still wins over the map.
+downloaded whole). The build and manifest caches key on the mapped
+repo and folder as well as name, commit and version, so remapping a name
+rebuilds instead of serving the previous folder's bytes.
+
+Each package resolves and fetches at its own resolved commit; one
+install is not an atomic snapshot across packages, so if the repo head
+moves between two packages' resolutions they can pin different commits.
+Tag the repo and depend on the tagged versions for a reproducible
+sibling set. The lockfile pins exact versions with their integrity: a
+moved tag or a remapped folder surfaces as a checksum mismatch (consona
+also warns when a tag points at another commit), never as silently
+different bytes - it detects the change rather than re-fetching the old
+bytes. A mapped name wins
+over ssh remotes and GitHub repos of the same name; a registered local
+folder still wins over the map.
 
 ## Undo
 

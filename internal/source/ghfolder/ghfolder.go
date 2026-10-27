@@ -68,7 +68,19 @@ func (s *Source) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, 
 	if !ok {
 		return nil, fmt.Errorf("%s: %w (not in the folder map)", name(ref), core.ErrNotFound)
 	}
-	return s.Gh.Revisions(ctx, repoRef(e))
+	revs, err := s.Gh.Revisions(ctx, repoRef(e))
+	if err != nil {
+		return nil, err
+	}
+	// Cache identity: a name remapped to another folder of the same repo
+	// at the same commit must not reuse the previous folder's cache.
+	// Stamp a copy: the delegate may share its returned slice.
+	out := make([]core.Revision, len(revs))
+	for i, r := range revs {
+		r.SourceID = "ghfolder/" + e.Repo + "/" + e.Path
+		out[i] = r
+	}
+	return out, nil
 }
 
 // Fetch extracts only the mapped folder of the repo at commit into dir.

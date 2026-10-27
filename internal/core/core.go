@@ -30,6 +30,12 @@ type Revision struct {
 	Tag     string // original tag name; empty for the default-branch fallback
 	Commit  string // full commit SHA
 	Head    bool   // true for the untagged default-branch fallback
+	// SourceID distinguishes revisions that share name and commit but not
+	// content: a package mapped to another folder of the same repo keeps
+	// the same commit, so without it the caches would serve the previous
+	// folder's bytes. It is folded into every cache identity and is never
+	// used as a fetch ref. Empty for sources whose name+commit is unique.
+	SourceID string
 }
 
 // ErrNotFound means the package's source does not exist or is not

@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +87,20 @@ func (e *Engine) base(b Builder, ref Ref) string {
 	return filepath.Join(e.CacheDir, b.Ecosystem(), ref.Owner, ref.Name)
 }
 
+// cacheID is a revision's cache identity: its commit, plus a short hash
+// of its SourceID when the source sets one (see Revision.SourceID), so a
+// remapped source never reuses the previous mapping's cached manifest or
+// artifact. The character set stays within ValidateCacheKey's commit
+// alphabet. Fetch always uses Revision.Commit, never this value.
+func cacheID(rev Revision) string {
+	if rev.SourceID == "" {
+		return rev.Commit
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(rev.SourceID))
+	return rev.Commit + "-src" + strconv.FormatUint(uint64(h.Sum32()), 16)
+}
+
 // Packages returns every published version of ref, ascending. Versions
 // without a build step are packed now (cheap); others are built on demand
 // by Build.
@@ -111,7 +127,7 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 	// Phase 1: manifests (cached per commit).
 	infos := make([]*Info, len(revs))
 	err = parallel(len(revs), func(i int) error {
-		f := filepath.Join(base, revs[i].Commit, "info.json")
+		f := filepath.Join(base, cacheID(revs[i]), "info.json")
 		var inf Info
 		if bs, err := os.ReadFile(f); err == nil && json.Unmarshal(bs, &inf) == nil {
 			infos[i] = &inf
@@ -149,7 +165,7 @@ func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) 
 	vers := AssignVersions(revs, mv)
 	out := make([]*Version, len(revs))
 	for i := range revs {
-		out[i] = &Version{Revision: revs[i], Version: vers[i], Info: infos[i], Built: e.cached(b, ref, revs[i].Commit, vers[i])}
+		out[i] = &Version{Revision: revs[i], Version: vers[i], Info: infos[i], Built: e.cached(b, ref, cacheID(revs[i]), vers[i])}
 	}
 	// Phase 2: pack versions that need no build step (cheap, gives integrity).
 	err = parallel(len(out), func(i int) error {
@@ -184,11 +200,11 @@ func (e *Engine) cached(b Builder, ref Ref, commit, version string) *Built {
 // Build returns the artifact for v, building and caching it if needed.
 // The returned Built is fresh; v itself is not modified.
 func (e *Engine) Build(ctx context.Context, b Builder, ref Ref, name string, v *Version) (*Built, error) {
-	dir := filepath.Join(e.base(b, ref), v.Revision.Commit, v.Version)
+	dir := filepath.Join(e.base(b, ref), cacheID(v.Revision), v.Version)
 	l := e.lock("build|" + dir)
 	l.Lock()
 	defer l.Unlock()
-	if bl := e.cached(b, ref, v.Revision.Commit, v.Version); bl != nil {
+	if bl := e.cached(b, ref, cacheID(v.Revision), v.Version); bl != nil {
 		return bl, nil
 	}
 	// A build must not die because one npm request was cancelled.
@@ -269,7 +285,7 @@ func (e *Engine) tryRemoteCache(ctx context.Context, b Builder, ref Ref, name st
 	if e.RemoteCache == nil || v.Revision.Commit == "" || v.Info == nil || !v.Info.NeedsBuild {
 		return nil, false
 	}
-	key := BuildCacheKey(b.Ecosystem(), ref.Owner, ref.Name, v.Revision.Commit, v.Version)
+	key := BuildCacheKey(b.Ecosystem(), ref.Owner, ref.Name, cacheID(v.Revision), v.Version)
 	if _, _, _, _, _, _, err := ValidateCacheKey(key); err != nil {
 		return nil, false
 	}

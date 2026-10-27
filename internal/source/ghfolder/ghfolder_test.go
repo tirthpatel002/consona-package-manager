@@ -65,6 +65,16 @@ func TestRevisionsDelegatesToRepo(t *testing.T) {
 	if err != nil || len(revs) != 1 || revs[0].Version != "1.2.0" {
 		t.Fatalf("revisions: %+v %v", revs, err)
 	}
+	// The source identity rides along so a remap to another folder of the
+	// same repo at the same commit never reuses this folder's cache.
+	if revs[0].SourceID != "ghfolder/acme/widgets/packages/core" {
+		t.Fatalf("SourceID: %q", revs[0].SourceID)
+	}
+	other := testSource(t, gh, packmap.Entry{Name: "@acme/widgets-core", Repo: "acme/widgets", Path: "packages/renamed"})
+	revs2, err := other.Revisions(context.Background(), widgetsRef)
+	if err != nil || revs2[0].SourceID == revs[0].SourceID {
+		t.Fatalf("remap must change the source identity: %+v %v", revs2, err)
+	}
 	// The repo's identity, not the package's, is what GitHub sees.
 	if d := s.Describe(widgetsRef); !strings.Contains(d, "acme/widgets") || !strings.Contains(d, "packages/core") {
 		t.Fatalf("describe: %q", d)
