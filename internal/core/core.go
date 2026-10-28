@@ -30,6 +30,12 @@ type Revision struct {
 	Tag     string // original tag name; empty for the default-branch fallback
 	Commit  string // full commit SHA
 	Head    bool   // true for the untagged default-branch fallback
+	// SourceID distinguishes revisions that share name and commit but not
+	// content: a package mapped to another folder of the same repo keeps
+	// the same commit, so without it the caches would serve the previous
+	// folder's bytes. It is folded into every cache identity and is never
+	// used as a fetch ref. Empty for sources whose name+commit is unique.
+	SourceID string
 }
 
 // ErrNotFound means the package's source does not exist or is not
@@ -136,4 +142,18 @@ type Adapter interface {
 	// through. baseURL is where Handler is mounted (adapters may use it to
 	// warm the daemon while the tool starts up).
 	Exec(ctx context.Context, baseURL string, args []string) int
+}
+
+type snapshotIDKey struct{}
+
+// WithSnapshotID marks ctx as resolving under the project snapshot id, so
+// version lists are never shared with live or other-snapshot requests.
+func WithSnapshotID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, snapshotIDKey{}, id)
+}
+
+// SnapshotID returns the request's snapshot id, or "" for live resolution.
+func SnapshotID(ctx context.Context) string {
+	id, _ := ctx.Value(snapshotIDKey{}).(string)
+	return id
 }

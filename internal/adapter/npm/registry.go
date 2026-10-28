@@ -20,6 +20,7 @@ import (
 	"github.com/tirthpatel002/consona-package-manager/internal/devsync"
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"github.com/tirthpatel002/consona-package-manager/internal/lookalike"
+	"github.com/tirthpatel002/consona-package-manager/internal/snapshot"
 )
 
 // Handler is npm's registry (setup points npm's `registry` here):
@@ -187,6 +188,29 @@ func jsonErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/s/") {
+		// Project snapshot: /s/<hash>/<normal npm path>. The snapshot rides
+		// in the request, so concurrent projects never share state; an
+		// unknown or corrupt snapshot is a clear error, never live data.
+		hash, tail, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/s/"), "/")
+		if !snapshot.ValidHash(hash) {
+			jsonErr(w, http.StatusBadRequest, "consona: invalid snapshot id in the registry URL")
+			return
+		}
+		snap, err := snapshot.Load(hash)
+		if err != nil {
+			jsonErr(w, http.StatusNotFound, "consona: "+err.Error())
+			return
+		}
+		r2 := r.Clone(snapshot.With(r.Context(), hash, snap))
+		u := *r.URL
+		u.Path = "/" + tail
+		if r.URL.RawPath != "" {
+			u.RawPath = "/" + strings.TrimPrefix(strings.TrimPrefix(r.URL.RawPath, "/s/"+hash), "/")
+		}
+		r2.URL = &u
+		r = r2
+	}
 	switch {
 	case r.URL.Path == "/-/warm" && r.Method == http.MethodPost:
 		var names []string
@@ -248,12 +272,22 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.trackDevProject(r, name, ref)
 			return
 		}
+		// The source is unreachable but the lockfile's commit-qualified
+		// tarball was built here before: serve those bytes.
+		if version, id, ok := npmpack.ParseQualifiedFileName(name, file); ok {
+			if bl := h.e.CachedByID(h.b, ref, id, version); bl != nil {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				http.ServeFile(w, r, bl.Path)
+				h.trackDevProject(r, name, ref)
+				return
+			}
+		}
 		h.fail(w, ref, name, err)
 		return
 	}
 	if file != "" {
 		for _, p := range pkgs {
-			if npmpack.FileName(name, p.Version) != file {
+			if npmpack.QualifiedFileName(name, p.Version, p.Revision) != file && npmpack.FileName(name, p.Version) != file {
 				continue
 			}
 			h.checkName(ref, name, p)
@@ -271,6 +305,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.trackDevProject(r, name, ref)
 			return
 		}
+		// A commit-qualified name can outlive the source's listing: the
+		// tag was moved or deleted, or the mapping changed, after the
+		// lockfile was written. Serve the pinned revision.
+		if version, id, ok := npmpack.ParseQualifiedFileName(name, file); ok && h.serveRevision(w, r, ref, name, version, id, pkgs) {
+			return
+		}
 		// A version the source no longer lists (a local folder changed
 		// since the lockfile was written) is still served if it was built.
 		if p := h.e.FindCached(h.b, ref, file); p != "" {
@@ -282,7 +322,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
 		return
 	}
-	if !h.noWarm {
+	if !h.noWarm && snapshot.FromContextOK(r.Context()) == false {
 		go h.warmDeps(name, pkgs, scopes)
 	}
 	h.checkName(ref, name, latest(pkgs))
@@ -351,6 +391,9 @@ func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err err
 	case errors.Is(err, core.ErrNotFound):
 		code, ecode = http.StatusNotFound, "not-found"
 		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %s was not found or is not accessible with your GitHub credentials. Check the name or request access; `consona token test` shows what each credential can see.", name, ref.Owner, h.e.Source.Describe(ref))
+	case errors.Is(err, snapshot.ErrRefused) || errors.Is(err, snapshot.ErrNotInSnapshot):
+		code, ecode = http.StatusConflict, "snapshot-conflict"
+		msg = fmt.Sprintf("%s: %v", name, err)
 	case errors.Is(err, core.ErrBuild):
 		code, ecode = http.StatusUnprocessableEntity, "build-failed"
 		msg = err.Error()
@@ -367,6 +410,47 @@ func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err err
 // built yet carry their declared manifest and tarball URL without hashes
 // (the handler first waits a bounded time for the latest version's build,
 // see awaitLatest, so that one normally has them).
+// serveRevision serves the exact commit a commit-qualified tarball name
+// pins (see npmpack.QualifiedFileName), for a lockfile written before a
+// tag moved or the version stopped being listed. It rebuilds at the
+// pinned commit only when the source's current identity matches the
+// name's: after a remap the old mapping's bytes are served from the
+// build cache or not at all, never rebuilt from the new mapping under
+// the old identity. Without a prior build the rebuild comes from the
+// pinned commit itself, so its bytes match the lockfile only when the
+// package builds reproducibly. Returns false when nothing was served.
+func (h *handler) serveRevision(w http.ResponseWriter, r *http.Request, ref core.Ref, name, version, id string, pkgs []*core.Version) bool {
+	commit, _ := core.SplitCacheID(id)
+	rev := core.Revision{Commit: commit}
+	if len(pkgs) > 0 {
+		rev.SourceID = pkgs[0].Revision.SourceID // the source's identity is uniform across its revisions
+	}
+	if core.CacheID(rev) == id {
+		v := &core.Version{Version: version, Revision: rev, Info: h.e.InfoAt(h.b, ref, id)}
+		if bl, err := h.e.Build(r.Context(), h.b, ref, name, v); err == nil {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, bl.Path)
+			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+				Repo: ref.Name, Version: version, CommitSHA: commit, Result: "ok",
+				Message: "served the lockfile's pinned commit (no longer the listed revision)"})
+			h.trackDevProject(r, name, ref)
+			return true
+		}
+		// The pinned commit may be unreachable (force-pushed away); the
+		// build cache below is the last resort.
+	}
+	if bl := h.e.CachedByID(h.b, ref, id, version); bl != nil {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, bl.Path)
+		logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+			Repo: ref.Name, Version: version, CommitSHA: commit, Result: "ok",
+			Message: "served from the build cache (no longer listed)"})
+		h.trackDevProject(r, name, ref)
+		return true
+	}
+	return false
+}
+
 func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 	versions := map[string]any{}
 	var list []string
@@ -383,7 +467,7 @@ func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 		if p.Revision.Commit != "" {
 			m["gitHead"] = p.Revision.Commit
 		}
-		dist := map[string]any{"tarball": base + "/" + name + "/-/" + npmpack.FileName(name, p.Version)}
+		dist := map[string]any{"tarball": base + "/" + name + "/-/" + npmpack.QualifiedFileName(name, p.Version, p.Revision)}
 		if p.Built != nil {
 			dist["shasum"] = p.Built.Artifact.SHA1
 			dist["integrity"] = "sha512-" + p.Built.Artifact.SHA512

@@ -58,7 +58,8 @@ const (
 	EvRemoteAdd             = "remote.add"
 	EvRemoteRemove          = "remote.remove"
 	EvRemoteTest            = "remote.test"
-	EvSSHProbe              = "ssh.probe" // a remote's package list was fetched (failures at warn)
+	EvFolderMap             = "folder.map" // consona map add|remove|sync (fields.repo, fields.path)
+	EvSSHProbe              = "ssh.probe"  // a remote's package list was fetched (failures at warn)
 	EvDevProjectTracked     = "dev.project_tracked"
 	EvDevSync               = "dev.sync"
 	EvDevBuild              = "dev.build"
@@ -74,7 +75,7 @@ var Events = []string{EvInstallResolve, EvInstallFetch, EvBuildStart, EvBuildFin
 	EvRegistryRedirect, EvAuditFilter, EvAuthForward, EvPeerLookup, EvCredentialResolve, EvCredentialFail,
 	EvTokenAdd, EvTokenRemove, EvTokenTest, EvSetup, EvSourceResolve, EvSourceFail, EvSourceNameMismatch, EvSourceRedirect, EvSourceTagMoved,
 	EvPublicLookalike, EvPublicLookalikeCheck, EvLocalRegister, EvLocalUnregister,
-	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvSSHProbe, EvDevProjectTracked, EvDevSync, EvDevBuild, EvBuildCacheRemoteHit, EvBuildCacheRemoteMiss, EvBuildCacheRemoteError, EvCachePrune, EvCIStart, EvCIFinish, EvPMDetect, EvLogstore, EvError}
+	EvRemoteAdd, EvRemoteRemove, EvRemoteTest, EvFolderMap, EvSSHProbe, EvDevProjectTracked, EvDevSync, EvDevBuild, EvBuildCacheRemoteHit, EvBuildCacheRemoteMiss, EvBuildCacheRemoteError, EvCachePrune, EvCIStart, EvCIFinish, EvPMDetect, EvLogstore, EvError}
 
 // Entry is one event. Both backends store exactly these fields.
 type Entry struct {

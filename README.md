@@ -1,6 +1,6 @@
 # consona
 
-**In two lines:** consona turns every package you own, wherever it lives, into a plain `npm install`: private GitHub repos, folders on this machine, and packages on your other machines over SSH, all served as `@owner/name` from one local registry, with no publishing and no repo changes.
+**In two lines:** consona turns every package you own, wherever it lives, into a plain `npm install`: private GitHub repos, folders inside them (monorepos), folders on this machine, and packages on your other machines over SSH, all served as `@owner/name` from one local registry, with no publishing and no repo changes.
 Run `consona setup` once: local copies win over remote ones so nothing is duplicated, and public npm keeps working exactly as before.
 
 ## Executive summary
@@ -11,7 +11,7 @@ Run `consona setup` once: local copies win over remote ones so nothing is duplic
 - **Credentials:** it uses whatever GitHub access you already have (per-owner or named tokens, `GH_TOKEN`/`GITHUB_TOKEN`, or the `gh` login) and never requires one specific kind.
 - **Trust and visibility:** builds run locally and are cached by commit, lockfiles get real integrity hashes, every command shows live verbose output (`--quiet` turns it off), and a structured log records everything without token values.
 - **Platforms:** macOS and Linux tested; the same commands and lockfiles on every OS.
-- **Examples:** step-by-step scenarios for every command are in [docs/examples.md](docs/examples.md).
+- **Examples:** step-by-step scenarios for every command are in [docs/examples.md](docs/examples.md); the working rules for repos, consumers and AI agents are in [docs/rules.md](docs/rules.md).
 
 ## Install
 
@@ -296,6 +296,7 @@ Everything consona knows about *you* lives in one directory, `~/.config/consona`
 | `identity.json` | username + this device's id | `consona init` |
 | `local-index.json` | registered folders (name -> path) | `register` / `unregister` |
 | `remotes.json` | explicit ssh remotes | `remote add` / `remove` |
+| `folder-map.json` | package name -> folder inside a GitHub repo | `map add` / `remove` / `sync` |
 | `tokens.json` | named token index (never values; those are in the OS secure store) | `token add` / `remove` |
 | `logs/events.db`, `logs/jsonl/` | event log (`CONSONA_LOG_DIR` overrides) | daemon and CLI |
 
@@ -316,10 +317,121 @@ npm install @tirth/my-lib           # this device's folders > ssh remotes > GitH
 ```
 
 Every install says where each package came from (`<- local ...`,
-`<- ssh devbox ...`, `<- github ...`). Folders are versioned by content
+`<- ssh devbox ...`, `<- github ...`; mapped folders show the repo and
+folder). Folders are versioned by content
 hash (`1.0.0-local.3.h2cab0880`) and rebuilt only when they change. Hosts
 in `~/.ssh/config` are found automatically. Details, versioning, caching,
 timings and limits: [docs/local-and-ssh.md](docs/local-and-ssh.md).
+
+## Folders inside GitHub repos (monorepos)
+
+A repo can serve many packages: map a name to one folder of it, and
+`npm install` fetches just that folder, with the repo's version tags as
+the package's versions. A folder can also release on its own schedule
+with a tag that names it (`@acme/widgets-core@v1.2.0`); see "By design".
+
+```sh
+consona map add @acme/widgets-core acme/widgets packages/core
+npm install @acme/widgets-core        # npm and pnpm, like any consona package
+```
+
+Mapped packages depend on each other by their normal names: when core
+and ui are both mapped, `"@acme/widgets-ui": "^1.0.0"` in
+`packages/core/package.json` resolves like any other private dependency
+(`^1.0.0` needs a `v1.x` tag on the repo; see "Failures to expect"
+below). Mapped scopes are routed to consona by `consona setup` like your
+other scopes.
+
+A repo that keeps a `consona.packages.json` at its root maps everything
+it declares in one step:
+
+```json
+{"packages":[{"name":"@acme/widgets-core","path":"packages/core"},
+             {"name":"@acme/widgets-ui","path":"packages/ui"}]}
+```
+
+```sh
+consona map sync acme/widgets   # add, update and unmap to match the repo
+consona map list                # what this device maps, and how (add | sync)
+consona map remove @acme/widgets-core
+```
+
+Worked examples with sample output:
+[docs/examples.md](docs/examples.md#210-serve-a-folder-of-a-repo-as-a-package-consona-map-add).
+The working rules for repos and consumers (developers and AI agents):
+[docs/rules.md](docs/rules.md).
+
+**By design**
+
+- Versions come from tags. A plain tag (`v1.4.0`) is the repo's
+  version, shared by every folder in it. A tag naming one package
+  (`@acme/widgets-core@v1.2.0`, the full mapped name, with or without
+  the `v`) is that folder's version alone and wins over a repo-wide tag
+  of the same version, so folders can release independently. An untagged
+  repo serves its default-branch head as `0.0.0-<commit>` (a
+  prerelease). Tag the repo - or the folder - to give packages real
+  semver.
+- The served name and version come from the map and the repo's tags, not
+  from the folder's `package.json` (the same rule as a repo of its own).
+  If `package.json` names something else, consona warns and code
+  importing that other name will not find it.
+- The folder is extracted alone and builds exactly as if it were a repo
+  of its own: its `package.json` must sit at the folder root, and files
+  outside the folder (root configs, a shared tsconfig, `file:` links out
+  of the folder) are not present at install or build time.
+- Only the mapped folder is written to disk, but the whole commit
+  tarball is downloaded: the map chooses what is served, it is not
+  access control. A credential that can read the repo can read every
+  folder in it.
+- A mapped name wins over ssh remotes and GitHub repos of the same
+  name; a registered local folder still wins over the map. A mapping
+  that fails (unreadable repo, folder missing at that commit) fails the
+  install rather than falling through to a same-named repo.
+- The build and manifest caches key on the mapped repo and folder as
+  well as name, commit and version, so remapping a name rebuilds instead
+  of serving the previous folder's bytes.
+- Each package resolves and fetches at its own resolved commit; one
+  install is not an atomic snapshot across packages (npm's registry
+  protocol carries no install-session identity).
+
+**Failures to expect**
+
+- On an untagged repo a sibling range like `^1.0.0` matches nothing (the
+  served version is the `0.0.0-<commit>` prerelease) and npm fails with
+  `ETARGET`. Use a range that admits it (for example `>=0.0.0-0`), tag
+  the repo `v1.x`, or tag the folder `@acme/widgets-ui@v1.0.0`.
+- If the repo head moves between two packages' resolutions they can pin
+  different commits. Under npm's current registry protocol no
+  install-session identity reaches the registry, so one install cannot
+  be an atomic snapshot across packages; tag the repo (or each folder)
+  and depend on the tagged versions for a reproducible sibling set.
+- Tarball URLs are commit-qualified: the lockfile pins the exact commit
+  (and, for a mapped folder, the mapping) each version's integrity was
+  built from. A moved tag changes the URL new installs fetch, and an old
+  lockfile keeps installing the commit it recorded - served from the
+  build cache when present, otherwise rebuilt from the pinned commit
+  (byte-identical when the package builds reproducibly). A remapped
+  folder never serves under the old mapping's URL: the original cached
+  bytes or a clean 404. consona still warns when a tag points at another
+  commit.
+- A mapped folder without a `package.json` at its root fails the
+  install, naming the repo, folder and commit.
+
+**Project snapshots (opt-in)**
+
+`consona snapshot create` + `consona snapshot use` freeze each repo's
+head, tags and folder mapping for a project, so the first install sees
+one repo state even if someone pushes mid-install. It fails closed
+(404/409, never live data) and does not make independently tagged
+packages share a commit. Details: docs/rules.md S1-S10.
+
+**Not verified yet**
+
+The mapped install, sibling dependencies and the remap case are proven
+locally on one machine and one account with npm 10.9 and pnpm 12.15 (snapshots
+included; not run on Windows or macOS).
+Real GitHub Actions CI and a second contributor's machine are untested;
+treat those setups as unverified until they are run.
 
 ## Undo
 
@@ -394,9 +506,11 @@ secure store); consona only holds them in memory.
 | `internal/identity` | `consona init`: username + device id |
 | `internal/localindex` | registered folders of this device |
 | `internal/source/local` | `Source`: registered folders, content-hash versions |
+| `internal/packmap` | the folder map: name -> GitHub repo folder (`folder-map.json`) |
+| `internal/source/ghfolder` | `Source`: packages that are folders inside GitHub repos |
 | `internal/source/sshremote` | `Source`: other devices over ssh (`remote-serve` protocol, ssh-config discovery, list cache) |
 | `internal/source/chain` | resolution order local > ssh > GitHub, resolution events |
-| `internal/localcli` | CLI for init/register/remote/which |
+| `internal/localcli` | CLI for init/register/remote/map/which |
 | `internal/builder/npmpack` | `Builder`: npm tarball via `npm pack` |
 | `internal/adapter/npm` | `Adapter`: npmrc setup, npm registry protocol, login lookup, `npm` wrapper |
 | `internal/daemon` | loopback server mounting each adapter at `/<name>/`, auto-start |

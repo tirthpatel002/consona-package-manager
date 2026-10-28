@@ -68,6 +68,43 @@ func FileName(name, version string) string {
 	return strings.NewReplacer("@", "", "/", "-").Replace(name) + "-" + version + ".tgz"
 }
 
+// QualifiedFileName is the tarball name the registry advertises for
+// name@version at rev: FileName with the revision's cache identity
+// (core.CacheID: the full commit, plus the source hash when the source
+// sets a SourceID) appended. A lockfile then records the exact commit
+// and source its integrity was built from, so a moved tag changes the
+// URL npm fetches instead of serving different bytes under the old one,
+// and the old URL keeps serving the pinned commit (see the registry's
+// recovery path). Revisions without a full commit (live local folders)
+// keep the plain FileName: their content moves with the folder, so no
+// commit could pin them.
+func QualifiedFileName(name, version string, rev core.Revision) string {
+	if !core.IsFullCommit(rev.Commit) {
+		return FileName(name, version)
+	}
+	return strings.TrimSuffix(FileName(name, version), ".tgz") + "-" + core.CacheID(rev) + ".tgz"
+}
+
+var qualifiedRe = regexp.MustCompile(`^(.+)-([0-9a-f]{40}(-src[0-9a-f]{64})?)\.tgz$`)
+
+// ParseQualifiedFileName is the inverse of QualifiedFileName: the version
+// and cache identity a qualified tarball name pins. ok is false for
+// plain FileName tarballs and foreign names; a parsed version is always
+// a ValidVersion, so both values are safe to use as cache path elements.
+// The version group is greedy, so a version that itself ends in a
+// 40-hex prerelease still splits at the identity.
+func ParseQualifiedFileName(name, file string) (version, id string, ok bool) {
+	rest, found := strings.CutPrefix(file, strings.TrimSuffix(FileName(name, ""), "-.tgz")+"-")
+	if !found {
+		return "", "", false
+	}
+	m := qualifiedRe.FindStringSubmatch(rest)
+	if m == nil || !core.ValidVersion(m[1]) {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
 // FileName implements core.ArtifactNamer for Builder.
 func (Builder) FileName(name, version string) string {
 	return FileName(name, version)

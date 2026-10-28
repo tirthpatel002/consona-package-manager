@@ -56,6 +56,28 @@ func RevisionsFromTags(tags []Tag, head string) []Revision {
 	return out
 }
 
+var fullCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// IsFullCommit reports whether s is a full 40-character hex commit SHA.
+// Only full commits pin an immutable fetch ref, so only they qualify a
+// tarball name (see npmpack.QualifiedFileName).
+func IsFullCommit(s string) bool { return fullCommitRe.MatchString(s) }
+
+var cacheIDRe = regexp.MustCompile(`^[0-9a-f]{40}(-src[0-9a-f]{64})?$`)
+
+// IsCacheID reports whether s is a well-formed cache identity (see
+// CacheID). Identities come from untrusted tarball URLs and become path
+// elements, so they are validated before either use.
+func IsCacheID(s string) bool { return cacheIDRe.MatchString(s) }
+
+// SplitCacheID splits a cache identity into its commit and source-hash
+// parts (the inverse of CacheID); src is empty for sources without a
+// SourceID. A hex commit cannot contain "-src", so the cut is unambiguous.
+func SplitCacheID(id string) (commit, src string) {
+	commit, src, _ = strings.Cut(id, "-src")
+	return commit, src
+}
+
 // HeadRevision is the single version used when a repo has no version tags.
 func HeadRevision(commit string) Revision {
 	short := commit

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/snapshot"
 	"io"
 	"net/http"
 	"net/url"
@@ -262,8 +263,67 @@ func repoPath(r core.Ref) string {
 	return "/repos/" + url.PathEscape(r.Owner) + "/" + url.PathEscape(r.Name)
 }
 
-// Revisions lists semver tags; with none, falls back to the default branch head.
+// Revisions lists the repo's revisions: its semver tags, or the
+// default-branch head when it has none.
 func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, error) {
+	tags, head, err := s.TagsAndHead(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return core.RevisionsFromTags(tags, head), nil
+}
+
+// Capture reads the repo's live tags and default-branch head, always both
+// (TagsAndHead skips the head when plain semver tags exist). It fails
+// instead of truncating when the repo has more tags than one capture
+// reads, because a silently partial snapshot would resolve wrong versions.
+func (s *Source) Capture(ctx context.Context, r core.Ref) ([]core.Tag, string, error) {
+	head, err := s.head(ctx, r)
+	if err != nil {
+		return nil, "", wrap(s, r, err)
+	}
+	var tags []core.Tag
+	for page := 1; ; page++ {
+		if page > 10 {
+			return nil, "", fmt.Errorf("%s/%s has more than 1000 tags; consona snapshots do not cover that yet", r.Owner, r.Name)
+		}
+		resp, err := s.get(ctx, r.Owner, r.Name, fmt.Sprintf("%s/tags?per_page=100&page=%d", repoPath(r), page), "application/vnd.github+json")
+		if err != nil {
+			return nil, "", wrap(s, r, err)
+		}
+		var batch []struct {
+			Name   string `json:"name"`
+			Commit struct {
+				SHA string `json:"sha"`
+			} `json:"commit"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&batch)
+		resp.Body.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		for _, t := range batch {
+			tags = append(tags, core.Tag{Name: t.Name, Commit: t.Commit.SHA})
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	return tags, head, nil
+}
+
+// TagsAndHead returns the repo's raw tags and its default-branch head
+// (fetched in parallel). Sources that select their own tag convention
+// (see ghfolder) compose revisions from these; the head is "" when no
+// caller needs it (the repo has plain semver tags) or its lookup failed
+// and tags exist. A head failure is fatal exactly when the repo has no
+// plain semver tags, matching Revisions.
+func (s *Source) TagsAndHead(ctx context.Context, r core.Ref) ([]core.Tag, string, error) {
+	// A request resolving under a project snapshot never reads live state:
+	// it gets the recorded tags and head, or an error (no live fallback).
+	if snap, _, ok := snapshot.FromContext(ctx); ok {
+		return snap.TagsAndHead(r)
+	}
 	// Ask for the default-branch head in parallel with the tags: it is only
 	// needed for untagged repos, but then it costs no extra round trip.
 	type headResult struct {
@@ -281,7 +341,7 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 	for page := 1; page <= 10; page++ {
 		resp, err := s.get(ctx, r.Owner, r.Name, fmt.Sprintf("%s/tags?per_page=100&page=%d", repoPath(r), page), "application/vnd.github+json")
 		if err != nil {
-			return nil, wrap(s, r, err)
+			return nil, "", wrap(s, r, err)
 		}
 		var batch []struct {
 			Name   string `json:"name"`
@@ -292,7 +352,7 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 		err = json.NewDecoder(resp.Body).Decode(&batch)
 		resp.Body.Close()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		for _, t := range batch {
 			tags = append(tags, core.Tag{Name: t.Name, Commit: t.Commit.SHA})
@@ -301,14 +361,14 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 			break
 		}
 	}
-	if revs := core.RevisionsFromTags(tags, ""); len(revs) > 0 {
-		return revs, nil
+	if len(core.RevisionsFromTags(tags, "")) > 0 {
+		return tags, "", nil
 	}
 	h := <-headc
 	if h.err != nil {
-		return nil, wrap(s, r, h.err)
+		return nil, "", wrap(s, r, h.err)
 	}
-	return core.RevisionsFromTags(nil, h.sha), nil
+	return tags, h.sha, nil
 }
 
 func (s *Source) head(ctx context.Context, r core.Ref) (string, error) {
@@ -333,6 +393,95 @@ func (s *Source) Fetch(ctx context.Context, r core.Ref, commit, dir string) erro
 	}
 	defer resp.Body.Close()
 	return Extract(resp.Body, dir)
+}
+
+// FetchPath downloads the commit tarball and extracts only the folder
+// prefix (slash-separated, relative to the repo root) into dir. The whole
+// tarball is downloaded; files outside the folder never land on disk.
+func (s *Source) FetchPath(ctx context.Context, r core.Ref, commit, prefix, dir string) error {
+	resp, err := s.get(ctx, r.Owner, r.Name, repoPath(r)+"/tarball/"+url.PathEscape(commit), "application/vnd.github+json")
+	if err != nil {
+		return wrap(s, r, err)
+	}
+	defer resp.Body.Close()
+	return ExtractPath(resp.Body, prefix, dir)
+}
+
+// ReadFile returns one file's content at the repo's default branch.
+func (s *Source) ReadFile(ctx context.Context, r core.Ref, path string) ([]byte, error) {
+	resp, err := s.get(ctx, r.Owner, r.Name, repoPath(r)+"/contents/"+path, "application/vnd.github.raw")
+	if err != nil {
+		return nil, wrap(s, r, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+}
+
+// ExtractPath unpacks only the entries under prefix from a GitHub-style
+// tar.gz (single top-level dir) into dir, stripping the top-level
+// component and the prefix. It fails when the prefix names no entry.
+func ExtractPath(r io.Reader, prefix, dir string) error {
+	prefix = strings.Trim(prefix, "/")
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	found := false
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			if !found {
+				return fmt.Errorf("folder %q not found in the repository at this commit", prefix)
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, rel, ok := strings.Cut(h.Name, "/")
+		if !ok || rel == "" {
+			continue
+		}
+		if rel != prefix && !strings.HasPrefix(rel, prefix+"/") {
+			continue
+		}
+		rel = strings.TrimPrefix(strings.TrimPrefix(rel, prefix), "/")
+		if rel == "" {
+			continue // the folder entry itself; created on demand below
+		}
+		rel = filepath.Clean(rel)
+		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+			return fmt.Errorf("unsafe path in archive: %s", h.Name)
+		}
+		dst := filepath.Join(dir, rel)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return err
+			}
+			found = true
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			mode := os.FileMode(0o644)
+			if h.Mode&0o111 != 0 {
+				mode = 0o755
+			}
+			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(f, tr)
+			f.Close()
+			if err != nil {
+				return err
+			}
+			found = true
+		}
+		// Symlinks and other entry types are skipped (npm pack ignores them too).
+	}
 }
 
 // Extract unpacks a GitHub-style tar.gz (single top-level dir) into dir,
