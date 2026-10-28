@@ -29,7 +29,7 @@ How to read the commands:
 Contents:
 
 1. [Getting started](#1-getting-started): set up once, check it works, undo
-2. [Private GitHub packages](#2-private-github-packages): install, versions, releases, builds, private dependencies, several accounts, warnings
+2. [Private GitHub packages](#2-private-github-packages): install, versions, releases, builds, private dependencies, several accounts, warnings, monorepo folders (`consona map`)
 3. [Local packages on the same machine](#3-local-packages-on-the-same-machine): `init`, `register`, live folders, names, `which`
 4. [Packages on other machines over SSH](#4-packages-on-other-machines-over-ssh): remotes, ssh config hosts, resolution order
 5. [GitHub credentials](#5-github-credentials-in-practice): order, per-owner variables, named tokens, gh, CI, errors
@@ -424,6 +424,154 @@ npm install @your-github-name/your-lib@1.2.0     # what the warning tells you to
 ```
 consona: warning: @your-github-name/your-lib@1.2.0: tag v1.2.0 now points at commit 9b1d2e4, but this version was built here before from commit 3fa9c21; a lockfile written then has the old integrity and npm will fail with EINTEGRITY. Run `npm install @your-github-name/your-lib@1.2.0` to update the lockfile, or move the tag back
 ```
+
+### 2.10 Serve a folder of a repo as a package (`consona map add`)
+
+**When to use:** one private repo holds several packages (a monorepo)
+and you want to install one folder of it by name, without splitting the
+repo or publishing anything.
+
+**Setup / assumptions:** as 2.1; the repo `acme-co/widgets` has
+`packages/core/package.json` (its `name` is `@acme-co/widgets-core`) and
+`packages/ui/package.json` (its `name` is `@acme-co/widgets-ui`), and
+your GitHub credential can read the repo.
+
+```sh
+consona map add @acme-co/widgets-core acme-co/widgets packages/core
+consona map add @acme-co/widgets-ui   acme-co/widgets packages/ui
+cd ~/projects/my-app
+npm install @acme-co/widgets-core     # pnpm works the same way
+```
+
+**What each part means:**
+
+- `map add` – keyword. Its three arguments are **your choice**: the
+  package name to serve, the `owner/repo` on GitHub, and the folder
+  inside the repo (slash-separated, no leading slash; the repo root,
+  `.` and `..` are refused). The name is lowercased.
+- The mapping lives on this device only (`folder-map.json` in consona's
+  config directory, mode 0600, like the other config files). The scope
+  is routed in your npmrc right away when npm is set up, and
+  `consona setup` includes mapped scopes like any other private scope.
+
+**What you'll see / what happens:**
+
+```
+consona: mapped @acme-co/widgets-core to folder packages/core of github.com/acme-co/widgets (its versions are the repo's tags)
+consona: source: @acme-co/widgets-core@1.4.0 <- github-folder github.com/acme-co/widgets (folder packages/core)
+```
+
+`consona which @acme-co/widgets-core` shows the same source line. A
+mapped name wins over ssh remotes and a same-named GitHub repo; a
+registered local folder still wins over the map (see 3.9 and 4.6). If
+the repo is unreadable or the folder does not exist at that commit, the
+install fails naming the repo and folder; a mapping never falls through
+to a same-named repo.
+
+### 2.11 Map everything a repo declares (`consona map sync`)
+
+**When to use:** the repo already lists the packages it serves, so each
+device maps them all with one command instead of one `map add` each.
+
+**Setup / assumptions:** as 2.10; `acme-co/widgets` keeps this
+`consona.packages.json` at its root:
+
+```json
+{"packages":[{"name":"@acme-co/widgets-core","path":"packages/core"},
+             {"name":"@acme-co/widgets-ui","path":"packages/ui"}]}
+```
+
+```sh
+consona map sync acme-co/widgets
+consona map list
+consona map remove @acme-co/widgets-ui
+```
+
+**What each part means:**
+
+- `map sync` – keyword; `acme-co/widgets` – **your choice**. Reads the
+  repo's root `consona.packages.json` at its default branch and makes
+  this device's map match it: new declarations are added, changed ones
+  updated, and names the repo no longer declares are unmapped. Entries
+  you added by hand (`map add`) are kept, unless the repo declares the
+  same name - the repo's declaration then replaces them.
+- `map list` – keyword: what this device maps, and how each entry got
+  there (`map add` or `map sync`).
+- `map remove` – keyword; fails when the name is not mapped.
+
+**What you'll see / what happens:**
+
+```
+consona: synced acme-co/widgets: 2 package(s) declared
+NAME                     REPO            FOLDER         HOW
+@acme-co/widgets-core    acme-co/widgets packages/core  map sync
+@acme-co/widgets-ui      acme-co/widgets packages/ui    map sync
+```
+
+If the repo cannot be read or the file is missing or invalid, sync
+fails and the map is left unchanged.
+
+### 2.12 Monorepo versions and sibling dependencies
+
+**When to use:** mapped packages depend on each other, or you want to
+know which versions npm sees for a mapped folder.
+
+**Setup / assumptions:** as 2.10; `packages/core/package.json` declares
+`"@acme-co/widgets-ui": "^1.0.0"` in its `dependencies`.
+
+```sh
+npm view @acme-co/widgets-core versions     # what consona offers for the folder
+npm install @acme-co/widgets-core           # widgets-ui comes along automatically
+```
+
+**What each part means / what happens:**
+
+- Versions belong to the repo, not the folder: tagging `acme-co/widgets`
+  `v1.4.0` offers both folders as `1.4.0` (see 2.2). Per-folder versions
+  are not supported.
+- An untagged repo serves a single `0.0.0-<commit>` prerelease, and a
+  dependency range must admit what the repo serves. On an untagged repo
+  `^1.0.0` matches nothing and npm fails with
+  `ETARGET No matching version found`; a range like `>=0.0.0-0` admits
+  the prerelease. Tag the repo `v1.x` and `^1.0.0` works. This is a
+  real failure to plan for, not a warning: existing `^` ranges between
+  the repo's packages need matching tags before they install.
+- Each package resolves on its own. Two mapped folders of one repo
+  normally install at the same commit, but if the repo head moves
+  between the two resolutions they can pin different commits - one
+  install is not an atomic snapshot across packages. For a reproducible
+  sibling set, tag the repo and depend on the tagged versions.
+- The lockfile pins each version with its integrity. A moved tag (see
+  2.9) or a remap to another folder changes the bytes, and npm then
+  fails with `EINTEGRITY`: the change is detected, but the old bytes are
+  not fetched again - update the lockfile or move the tag back.
+
+### 2.13 What a mapped folder sees at install and build time
+
+**When to use:** a mapped package runs a build or imports files, and you
+want to know exactly what is present.
+
+**Setup / assumptions:** as 2.10.
+
+**What you'll see / what happens:**
+
+- Only the mapped folder is extracted, and it builds exactly as if it
+  were a repo of its own (2.4): its `package.json` must sit at the
+  folder root, and files outside the folder - root configs, a shared
+  tsconfig, `file:` dependencies pointing outside - are not present at
+  install or build time. Keep each package self-contained in its folder.
+  A folder without a `package.json` fails the install, naming the repo,
+  folder and commit.
+- The served name and version come from the map and the repo's tags, not
+  from the folder's `package.json`. Make its `name` match the mapped
+  name; otherwise the name-mismatch warning of 2.8 applies and code
+  importing the other name will not find it.
+- The whole commit tarball is downloaded before the folder is extracted:
+  the map chooses what is served, it is not access control. A credential
+  that can read the repo can read every folder in it.
+- Remapping a name to another folder (or another repo) rebuilds instead
+  of serving the previous folder's cached bytes; both mappings stay
+  cached under their own identities, no cache clearing needed.
 
 ## 3. Local packages on the same machine
 

@@ -334,10 +334,12 @@ consona map add @acme/widgets-core acme/widgets packages/core
 npm install @acme/widgets-core        # npm and pnpm, like any consona package
 ```
 
-Mapped packages depend on each other by their normal names
-(`"@acme/widgets-ui": "^1.0.0"` in `packages/core/package.json` just
-works when both are mapped). Mapped scopes are routed to consona by
-`consona setup` like your other scopes.
+Mapped packages depend on each other by their normal names: when core
+and ui are both mapped, `"@acme/widgets-ui": "^1.0.0"` in
+`packages/core/package.json` resolves like any other private dependency
+(`^1.0.0` needs a `v1.x` tag on the repo; see "Failures to expect"
+below). Mapped scopes are routed to consona by `consona setup` like your
+other scopes.
 
 A repo that keeps a `consona.packages.json` at its root maps everything
 it declares in one step:
@@ -353,28 +355,59 @@ consona map list                # what this device maps, and how (add | sync)
 consona map remove @acme/widgets-core
 ```
 
-Versions are the repo's version tags, shared by every folder in it. An
-untagged repo serves its default-branch head as `0.0.0-<commit>` (a
-prerelease), so on an untagged repo dependencies between folders need a
-range that admits it (for example `>=0.0.0-0`); `^1.0.0` matches only
-once the repo carries a `v1.x` tag. Tag the repo to give its folders real
-semver. Only the mapped folder is extracted from the commit tarball
-(files outside it never land on disk, though the tarball itself is
-downloaded whole). The build and manifest caches key on the mapped
-repo and folder as well as name, commit and version, so remapping a name
-rebuilds instead of serving the previous folder's bytes.
+Worked examples with sample output:
+[docs/examples.md](docs/examples.md#210-serve-a-folder-of-a-repo-as-a-package-consona-map-add).
 
-Each package resolves and fetches at its own resolved commit; one
-install is not an atomic snapshot across packages, so if the repo head
-moves between two packages' resolutions they can pin different commits.
-Tag the repo and depend on the tagged versions for a reproducible
-sibling set. The lockfile pins exact versions with their integrity: a
-moved tag or a remapped folder surfaces as a checksum mismatch (consona
-also warns when a tag points at another commit), never as silently
-different bytes - it detects the change rather than re-fetching the old
-bytes. A mapped name wins
-over ssh remotes and GitHub repos of the same name; a registered local
-folder still wins over the map.
+**By design**
+
+- Versions are the repo's version tags, shared by every folder in it;
+  per-folder versions are not supported. An untagged repo serves its
+  default-branch head as `0.0.0-<commit>` (a prerelease). Tag the repo
+  to give its folders real semver.
+- The served name and version come from the map and the repo's tags, not
+  from the folder's `package.json` (the same rule as a repo of its own).
+  If `package.json` names something else, consona warns and code
+  importing that other name will not find it.
+- The folder is extracted alone and builds exactly as if it were a repo
+  of its own: its `package.json` must sit at the folder root, and files
+  outside the folder (root configs, a shared tsconfig, `file:` links out
+  of the folder) are not present at install or build time.
+- Only the mapped folder is written to disk, but the whole commit
+  tarball is downloaded: the map chooses what is served, it is not
+  access control. A credential that can read the repo can read every
+  folder in it.
+- A mapped name wins over ssh remotes and GitHub repos of the same
+  name; a registered local folder still wins over the map. A mapping
+  that fails (unreadable repo, folder missing at that commit) fails the
+  install rather than falling through to a same-named repo.
+- The build and manifest caches key on the mapped repo and folder as
+  well as name, commit and version, so remapping a name rebuilds instead
+  of serving the previous folder's bytes.
+- Each package resolves and fetches at its own resolved commit; one
+  install is not an atomic snapshot across packages.
+
+**Failures to expect**
+
+- On an untagged repo a sibling range like `^1.0.0` matches nothing (the
+  served version is the `0.0.0-<commit>` prerelease) and npm fails with
+  `ETARGET`. Use a range that admits it (for example `>=0.0.0-0`) or tag
+  the repo `v1.x`.
+- If the repo head moves between two packages' resolutions they can pin
+  different commits. Tag the repo and depend on the tagged versions for
+  a reproducible sibling set.
+- The lockfile pins exact versions with their integrity: a moved tag or
+  a remapped folder surfaces as a checksum mismatch (consona also warns
+  when a tag points at another commit), never as silently different
+  bytes. It detects the change rather than re-fetching the old bytes.
+- A mapped folder without a `package.json` at its root fails the
+  install, naming the repo, folder and commit.
+
+**Not verified yet**
+
+The mapped install, sibling dependencies and the remap case are proven
+locally on one machine and one account with npm 10.9 and pnpm 12.15.
+Real GitHub Actions CI and a second contributor's machine are untested;
+treat those setups as unverified until they are run.
 
 ## Undo
 

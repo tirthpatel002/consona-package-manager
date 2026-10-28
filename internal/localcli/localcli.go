@@ -61,6 +61,7 @@ const Usage = `
                                        version. Versions are the repo's tags, shared by its folders.
   consona map list|remove <@scope/pkg>|sync <owner/repo>
                                        sync maps everything a repo's root consona.packages.json declares
+                                       and unmaps what it no longer declares
   consona which <@scope/pkg>           where a package would come from
 `
 
