@@ -615,7 +615,7 @@ If the folder map no longer matches what the snapshot recorded, npm stops
 with a 409 and says which mapping changed; nothing is served from live
 data. Refresh on purpose with `consona snapshot update` (it prints head and
 tag changes), then `npm install` and commit the snapshot and lockfile
-together. Rules: docs/rules.md S1-S9.
+together. Rules: docs/rules.md S1-S10.
 
 ## 3. Local packages on the same machine
 

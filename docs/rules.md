@@ -69,7 +69,7 @@ install identity, so each package reads the repo's tags and head at its
 own moment. If the repo changes mid-install, two packages can see
 different repo states. Tag and depend on tagged versions, and the
 lockfile then pins exact commits (R12). To make the FIRST install
-consistent too, use a project snapshot (rules S1-S9).
+consistent too, use a project snapshot (rules S1-S10).
 
 ### Project snapshots (opt-in)
 
@@ -81,7 +81,12 @@ loads it on this device and adds a managed block to the project's
 `/npm/s/<sha256 of the file>/`. Plain installs without that block are
 live, exactly as before. `consona snapshot unuse` removes the block;
 other `.npmrc` lines are never touched, and `use` refuses if the file
-already sets `@scope:registry` for one of the scopes.
+already sets `@scope:registry` for one of the scopes. Snapshots cover
+scoped packages only (a snapshot must list at least one scope); unscoped
+names are never routed through consona. If writing the `.npmrc` fails,
+`use` reports the error and does not claim the project is active (the
+stored copy is harmless and `use` is safe to rerun); an existing
+`.npmrc` keeps its permission bits, and a symlinked one is refused.
 
 S2. What it guarantees: every package of an install resolves against
 the same recorded tag set and head per repo, so a push or a moved tag
@@ -93,8 +98,12 @@ same every time instead of depending on timing.
 S3. Capture is stable, not atomic. GitHub offers no atomic read of head
 and tags together. Create reads each repo twice and writes only if both
 reads agree (up to 3 tries), else it writes nothing. Different repos
-are captured one after another. More than 1000 tags in a repo is
-refused rather than truncated.
+are captured one after another. Tags are read page by page (100 per
+page, up to 10 pages) and the head separately, so a tag added between
+pages is caught only because the second full read then differs. More
+than 1000 tags in a repo is refused rather than truncated. Annotated
+and lightweight tags are recorded by the commit GitHub's tags API
+reports, the same value live resolution uses.
 
 S4. Fail closed. Under a snapshot nothing falls back to live data. The
 daemon answers 404 for a snapshot that is not loaded or whose stored
@@ -125,7 +134,18 @@ A moved tag is a release-hygiene bug (R4); do not move tags.
 S8. Snapshot requests never reuse the 30 second version-list cache, so
 the mapping check runs on every request.
 
-S9. Verified: npm 10.9 and pnpm 12.15 install through the snapshot URL
+S9. Metadata versus tarballs. The snapshot governs what npm is told
+exists (the packument). Tarball URLs are not snapshot-scoped: each names
+an exact commit and source identity, and the daemon serves only that:
+cached bytes for it, else a rebuild from that exact commit when the
+source's current identity (repo, folder) still matches it, else a 404.
+A changed mapping therefore gives 409 on metadata (new resolution) and
+never serves another folder's bytes to an old lockfile URL; an old
+lockfile URL for the previously built bytes still gets those cached
+bytes. A registered local folder cannot supply bytes for a pinned
+GitHub commit URL either.
+
+S10. Verified: npm 10.9 and pnpm 12.15 install through the snapshot URL
 on Linux; the carrier needs no process lookup, but it has not been run
 on Windows or macOS. An AI agent: run `consona snapshot show` before
 changing dependencies, never edit the file by hand (the hash changes and
@@ -204,7 +224,7 @@ failure contradicts this file, trust the observed failure and say so.
 ## 8. Known limits (current, honest)
 
 - Without a snapshot an install is not consistent across packages
-  (R9). With one it is consistent per repo (S1-S9); not atomic across
+  (R9). With one it is consistent per repo (S1-S10); not atomic across
   repos, and not a single commit for independently tagged packages.
 - Recovery of pinned commits depends on the build cache or a
   reproducible rebuild; neither is guaranteed forever (R14).

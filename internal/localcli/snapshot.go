@@ -240,7 +240,19 @@ func printDiff(old, cur *snapshot.Snapshot) {
 	}
 }
 
+// writeFileAtomic replaces path via a temp file in the same directory. An
+// existing file keeps its permission bits (a project .npmrc may be 0600
+// because it holds tokens); a symlink is refused rather than replaced.
 func writeFileAtomic(path string, data []byte) error {
+	mode := os.FileMode(0o644)
+	if fi, err := os.Lstat(path); err == nil {
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file (symlinks are not replaced)", path)
+		}
+		mode = fi.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".consona-tmp-")
 	if err != nil {
@@ -254,7 +266,7 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	if err := os.Chmod(tmp.Name(), mode); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)

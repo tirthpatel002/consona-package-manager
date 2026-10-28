@@ -423,7 +423,7 @@ The working rules for repos and consumers (developers and AI agents):
 head, tags and folder mapping for a project, so the first install sees
 one repo state even if someone pushes mid-install. It fails closed
 (404/409, never live data) and does not make independently tagged
-packages share a commit. Details: docs/rules.md S1-S9.
+packages share a commit. Details: docs/rules.md S1-S10.
 
 **Not verified yet**
 
