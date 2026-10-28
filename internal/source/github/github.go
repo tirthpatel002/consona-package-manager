@@ -262,8 +262,23 @@ func repoPath(r core.Ref) string {
 	return "/repos/" + url.PathEscape(r.Owner) + "/" + url.PathEscape(r.Name)
 }
 
-// Revisions lists semver tags; with none, falls back to the default branch head.
+// Revisions lists the repo's revisions: its semver tags, or the
+// default-branch head when it has none.
 func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, error) {
+	tags, head, err := s.TagsAndHead(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return core.RevisionsFromTags(tags, head), nil
+}
+
+// TagsAndHead returns the repo's raw tags and its default-branch head
+// (fetched in parallel). Sources that select their own tag convention
+// (see ghfolder) compose revisions from these; the head is "" when no
+// caller needs it (the repo has plain semver tags) or its lookup failed
+// and tags exist. A head failure is fatal exactly when the repo has no
+// plain semver tags, matching Revisions.
+func (s *Source) TagsAndHead(ctx context.Context, r core.Ref) ([]core.Tag, string, error) {
 	// Ask for the default-branch head in parallel with the tags: it is only
 	// needed for untagged repos, but then it costs no extra round trip.
 	type headResult struct {
@@ -281,7 +296,7 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 	for page := 1; page <= 10; page++ {
 		resp, err := s.get(ctx, r.Owner, r.Name, fmt.Sprintf("%s/tags?per_page=100&page=%d", repoPath(r), page), "application/vnd.github+json")
 		if err != nil {
-			return nil, wrap(s, r, err)
+			return nil, "", wrap(s, r, err)
 		}
 		var batch []struct {
 			Name   string `json:"name"`
@@ -292,7 +307,7 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 		err = json.NewDecoder(resp.Body).Decode(&batch)
 		resp.Body.Close()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		for _, t := range batch {
 			tags = append(tags, core.Tag{Name: t.Name, Commit: t.Commit.SHA})
@@ -301,14 +316,14 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 			break
 		}
 	}
-	if revs := core.RevisionsFromTags(tags, ""); len(revs) > 0 {
-		return revs, nil
+	if len(core.RevisionsFromTags(tags, "")) > 0 {
+		return tags, "", nil
 	}
 	h := <-headc
 	if h.err != nil {
-		return nil, wrap(s, r, h.err)
+		return nil, "", wrap(s, r, h.err)
 	}
-	return core.RevisionsFromTags(nil, h.sha), nil
+	return tags, h.sha, nil
 }
 
 func (s *Source) head(ctx context.Context, r core.Ref) (string, error) {

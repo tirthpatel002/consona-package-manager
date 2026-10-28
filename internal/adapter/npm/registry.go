@@ -248,12 +248,22 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.trackDevProject(r, name, ref)
 			return
 		}
+		// The source is unreachable but the lockfile's commit-qualified
+		// tarball was built here before: serve those bytes.
+		if version, id, ok := npmpack.ParseQualifiedFileName(name, file); ok {
+			if bl := h.e.CachedByID(h.b, ref, id, version); bl != nil {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				http.ServeFile(w, r, bl.Path)
+				h.trackDevProject(r, name, ref)
+				return
+			}
+		}
 		h.fail(w, ref, name, err)
 		return
 	}
 	if file != "" {
 		for _, p := range pkgs {
-			if npmpack.FileName(name, p.Version) != file {
+			if npmpack.QualifiedFileName(name, p.Version, p.Revision) != file && npmpack.FileName(name, p.Version) != file {
 				continue
 			}
 			h.checkName(ref, name, p)
@@ -269,6 +279,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
 				Repo: ref.Name, Version: p.Version, CommitSHA: p.Revision.Commit, Result: "ok", DurationMS: time.Since(start).Milliseconds()})
 			h.trackDevProject(r, name, ref)
+			return
+		}
+		// A commit-qualified name can outlive the source's listing: the
+		// tag was moved or deleted, or the mapping changed, after the
+		// lockfile was written. Serve the pinned revision.
+		if version, id, ok := npmpack.ParseQualifiedFileName(name, file); ok && h.serveRevision(w, r, ref, name, version, id, pkgs) {
 			return
 		}
 		// A version the source no longer lists (a local folder changed
@@ -367,6 +383,47 @@ func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err err
 // built yet carry their declared manifest and tarball URL without hashes
 // (the handler first waits a bounded time for the latest version's build,
 // see awaitLatest, so that one normally has them).
+// serveRevision serves the exact commit a commit-qualified tarball name
+// pins (see npmpack.QualifiedFileName), for a lockfile written before a
+// tag moved or the version stopped being listed. It rebuilds at the
+// pinned commit only when the source's current identity matches the
+// name's: after a remap the old mapping's bytes are served from the
+// build cache or not at all, never rebuilt from the new mapping under
+// the old identity. Without a prior build the rebuild comes from the
+// pinned commit itself, so its bytes match the lockfile only when the
+// package builds reproducibly. Returns false when nothing was served.
+func (h *handler) serveRevision(w http.ResponseWriter, r *http.Request, ref core.Ref, name, version, id string, pkgs []*core.Version) bool {
+	commit, _ := core.SplitCacheID(id)
+	rev := core.Revision{Commit: commit}
+	if len(pkgs) > 0 {
+		rev.SourceID = pkgs[0].Revision.SourceID // the source's identity is uniform across its revisions
+	}
+	if core.CacheID(rev) == id {
+		v := &core.Version{Version: version, Revision: rev, Info: h.e.InfoAt(h.b, ref, id)}
+		if bl, err := h.e.Build(r.Context(), h.b, ref, name, v); err == nil {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeFile(w, r, bl.Path)
+			logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+				Repo: ref.Name, Version: version, CommitSHA: commit, Result: "ok",
+				Message: "served the lockfile's pinned commit (no longer the listed revision)"})
+			h.trackDevProject(r, name, ref)
+			return true
+		}
+		// The pinned commit may be unreachable (force-pushed away); the
+		// build cache below is the last resort.
+	}
+	if bl := h.e.CachedByID(h.b, ref, id, version); bl != nil {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, bl.Path)
+		logstore.LogQuiet(logstore.Entry{Event: logstore.EvInstallFetch, Level: "info", Ecosystem: "npm", Package: name, Owner: ref.Owner,
+			Repo: ref.Name, Version: version, CommitSHA: commit, Result: "ok",
+			Message: "served from the build cache (no longer listed)"})
+		h.trackDevProject(r, name, ref)
+		return true
+	}
+	return false
+}
+
 func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 	versions := map[string]any{}
 	var list []string
@@ -383,7 +440,7 @@ func Packument(name, base string, pkgs []*core.Version) ([]byte, error) {
 		if p.Revision.Commit != "" {
 			m["gitHead"] = p.Revision.Commit
 		}
-		dist := map[string]any{"tarball": base + "/" + name + "/-/" + npmpack.FileName(name, p.Version)}
+		dist := map[string]any{"tarball": base + "/" + name + "/-/" + npmpack.QualifiedFileName(name, p.Version, p.Revision)}
 		if p.Built != nil {
 			dist["shasum"] = p.Built.Artifact.SHA1
 			dist["integrity"] = "sha512-" + p.Built.Artifact.SHA512

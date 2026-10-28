@@ -33,6 +33,34 @@ func (e *Engine) live(ref Ref) bool {
 	return ok && l.Live(ref)
 }
 
+// CachedByID returns the cached artifact for one cache identity (see
+// CacheID) and version without consulting the source. It serves a
+// lockfile's commit-qualified tarball when the source no longer lists
+// that revision (a moved or deleted tag, or a changed mapping): the
+// previously built bytes are served, never a rebuild under a changed
+// mapping. id and version come from an untrusted URL and are validated
+// before becoming path elements.
+func (e *Engine) CachedByID(b Builder, ref Ref, id, version string) *Built {
+	if !IsCacheID(id) || !ValidVersion(version) {
+		return nil
+	}
+	return e.cached(b, ref, id, version)
+}
+
+// InfoAt returns the cached manifest info for one cache identity, when
+// this machine listed that revision before. A recovery build at an exact
+// commit uses it to learn whether the package needs its build scripts.
+func (e *Engine) InfoAt(b Builder, ref Ref, id string) *Info {
+	if !IsCacheID(id) {
+		return nil
+	}
+	var inf Info
+	if bs, err := os.ReadFile(filepath.Join(e.base(b, ref), id, "info.json")); err == nil && json.Unmarshal(bs, &inf) == nil {
+		return &inf
+	}
+	return nil
+}
+
 // FindCached returns the path of an already built artifact file of ref
 // (any revision), or "". It lets a lockfile keep installing a version the
 // source no longer lists (e.g. a local folder that has changed since).

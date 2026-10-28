@@ -42,15 +42,15 @@ func (markerBuilder) Build(_ context.Context, dir string, r BuildRequest) (*Arti
 
 func TestCacheID(t *testing.T) {
 	rev := Revision{Commit: "abc123"}
-	if got := cacheID(rev); got != "abc123" {
+	if got := CacheID(rev); got != "abc123" {
 		t.Fatalf("no SourceID: %q", got)
 	}
-	a := cacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"})
-	b := cacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/b"})
+	a := CacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"})
+	b := CacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/b"})
 	if a == b {
 		t.Fatal("different folders must not share a cache identity")
 	}
-	if a != cacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"}) {
+	if a != CacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"}) {
 		t.Fatal("cache identity must be stable")
 	}
 	for _, id := range []string{a, b} {
@@ -99,7 +99,7 @@ func TestRemapDoesNotServeStaleCache(t *testing.T) {
 		t.Fatalf("remap back: %q", got)
 	}
 	// SourceID travels into the remote-cache key too.
-	key := BuildCacheKey("npm", "o", "x", cacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"}), "1.0.0")
+	key := BuildCacheKey("npm", "o", "x", CacheID(Revision{Commit: "abc123", SourceID: "ghfolder/acme/widgets/packages/a"}), "1.0.0")
 	if key == BuildCacheKey("npm", "o", "x", "abc123", "1.0.0") {
 		t.Fatal("remote cache key must include the source identity")
 	}

@@ -17,16 +17,17 @@ import (
 )
 
 type fakeGh struct {
-	revs     []core.Revision
-	revErr   error
+	tags     []core.Tag
+	head     string
+	tagsErr  error
 	fetchErr error
 	fetched  []string // prefixes fetched
 	files    map[string]string
 }
 
 func (f *fakeGh) Describe(ref core.Ref) string { return "github.com/" + ref.String() }
-func (f *fakeGh) Revisions(_ context.Context, ref core.Ref) ([]core.Revision, error) {
-	return f.revs, f.revErr
+func (f *fakeGh) TagsAndHead(_ context.Context, ref core.Ref) ([]core.Tag, string, error) {
+	return f.tags, f.head, f.tagsErr
 }
 func (f *fakeGh) FetchPath(_ context.Context, ref core.Ref, commit, prefix, dir string) error {
 	f.fetched = append(f.fetched, ref.String()+"@"+commit+":"+prefix)
@@ -59,7 +60,7 @@ func testSource(t *testing.T, gh GitHub, entries ...packmap.Entry) *Source {
 var widgetsRef = core.Ref{Owner: "acme", Name: "widgets-core"}
 
 func TestRevisionsDelegatesToRepo(t *testing.T) {
-	gh := &fakeGh{revs: []core.Revision{{Version: "1.2.0", Commit: "abc123"}}}
+	gh := &fakeGh{tags: []core.Tag{{Name: "v1.2.0", Commit: "abc123"}}}
 	s := testSource(t, gh, packmap.Entry{Name: "@acme/widgets-core", Repo: "acme/widgets", Path: "packages/core"})
 	revs, err := s.Revisions(context.Background(), widgetsRef)
 	if err != nil || len(revs) != 1 || revs[0].Version != "1.2.0" {
@@ -212,5 +213,94 @@ func TestExtractPathRejectsUnsafe(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "evil.txt")); !os.IsNotExist(err) {
 		t.Fatal("unsafe entry must not be written")
+	}
+}
+
+func TestRevisionsPerFolderTags(t *testing.T) {
+	gh := &fakeGh{tags: []core.Tag{
+		{Name: "v1.0.0", Commit: "aaaa"},                       // repo-wide: shared by every folder
+		{Name: "@acme/widgets-core@v1.1.0", Commit: "bbbb"},    // this folder, "v" prefix
+		{Name: "@acme/widgets-core@1.2.0", Commit: "cccc"},     // this folder, bare
+		{Name: "@acme/widgets-ui@v9.9.9", Commit: "dddd"},      // another package in the repo
+		{Name: "widgets-core@1.3.0", Commit: "eeee"},           // bare folder name: not the full mapped name
+		{Name: "@acme/widgets-core@notsemver", Commit: "ffff"}, // not a version
+	}}
+	s := testSource(t, gh, packmap.Entry{Name: "@acme/widgets-core", Repo: "acme/widgets", Path: "packages/core"})
+	revs, err := s.Revisions(context.Background(), widgetsRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range revs {
+		got = append(got, r.Version+"="+r.Tag+"@"+r.Commit)
+		if r.SourceID != "ghfolder/acme/widgets/packages/core" {
+			t.Fatalf("SourceID: %q", r.SourceID)
+		}
+	}
+	want := []string{
+		"1.0.0=v1.0.0@aaaa",
+		"1.1.0=@acme/widgets-core@v1.1.0@bbbb",
+		"1.2.0=@acme/widgets-core@1.2.0@cccc",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestRevisionsPerFolderTagWinsSameVersion(t *testing.T) {
+	gh := &fakeGh{tags: []core.Tag{
+		{Name: "v1.4.0", Commit: "shared"},
+		{Name: "@acme/widgets-core@v1.4.0", Commit: "folder"},
+	}}
+	s := testSource(t, gh, packmap.Entry{Name: "@acme/widgets-core", Repo: "acme/widgets", Path: "packages/core"})
+	revs, err := s.Revisions(context.Background(), widgetsRef)
+	if err != nil || len(revs) != 1 {
+		t.Fatalf("revisions: %+v %v", revs, err)
+	}
+	if revs[0].Commit != "folder" || revs[0].Tag != "@acme/widgets-core@v1.4.0" {
+		t.Fatalf("the per-folder tag must win its version: %+v", revs[0])
+	}
+}
+
+func TestRevisionsPerFolderTagKeepsHeadFallback(t *testing.T) {
+	// A repo with only per-folder tags still serves its default-branch
+	// head, so untagged-style ranges (>=0.0.0-0) keep working.
+	gh := &fakeGh{
+		tags: []core.Tag{{Name: "@acme/widgets-core@v1.0.0", Commit: "bbbb"}},
+		head: "deadbeefcafe",
+	}
+	s := testSource(t, gh, packmap.Entry{Name: "@acme/widgets-core", Repo: "acme/widgets", Path: "packages/core"})
+	revs, err := s.Revisions(context.Background(), widgetsRef)
+	if err != nil || len(revs) != 2 {
+		t.Fatalf("revisions: %+v %v", revs, err)
+	}
+	if revs[0].Version != "0.0.0-deadbee" || !revs[0].Head || revs[1].Version != "1.0.0" {
+		t.Fatalf("revisions: %+v", revs)
+	}
+}
+
+func TestFolderTagVersion(t *testing.T) {
+	for _, c := range []struct {
+		tag, name, want string
+		ok              bool
+	}{
+		{"@acme/widgets-core@v1.2.3", "@acme/widgets-core", "1.2.3", true},
+		{"@acme/widgets-core@1.2.3", "@acme/widgets-core", "1.2.3", true},
+		{"@ACME/Widgets-Core@1.2.3", "@acme/widgets-core", "1.2.3", true}, // git tags are case-sensitive; matching is not
+		{"@acme/widgets-core@1.2.3-rc.1", "@acme/widgets-core", "1.2.3-rc.1", true},
+		{"widgets-core@1.2.3", "@acme/widgets-core", "", false},  // must be the full mapped name
+		{"@acme/widgets-ui@1.2.3", "@acme/widgets-core", "", false},
+		{"@acme/widgets-core@1.2", "@acme/widgets-core", "", false},
+		{"v1.2.3", "@acme/widgets-core", "", false}, // repo-wide tag: not per-folder
+	} {
+		v, ok := folderTagVersion(c.tag, c.name)
+		if v != c.want || ok != c.ok {
+			t.Errorf("folderTagVersion(%q, %q) = %q, %v; want %q, %v", c.tag, c.name, v, ok, c.want, c.ok)
+		}
 	}
 }

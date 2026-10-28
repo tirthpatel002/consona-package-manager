@@ -11,7 +11,7 @@ Run `consona setup` once: local copies win over remote ones so nothing is duplic
 - **Credentials:** it uses whatever GitHub access you already have (per-owner or named tokens, `GH_TOKEN`/`GITHUB_TOKEN`, or the `gh` login) and never requires one specific kind.
 - **Trust and visibility:** builds run locally and are cached by commit, lockfiles get real integrity hashes, every command shows live verbose output (`--quiet` turns it off), and a structured log records everything without token values.
 - **Platforms:** macOS and Linux tested; the same commands and lockfiles on every OS.
-- **Examples:** step-by-step scenarios for every command are in [docs/examples.md](docs/examples.md).
+- **Examples:** step-by-step scenarios for every command are in [docs/examples.md](docs/examples.md); the working rules for repos, consumers and AI agents are in [docs/rules.md](docs/rules.md).
 
 ## Install
 
@@ -327,7 +327,8 @@ timings and limits: [docs/local-and-ssh.md](docs/local-and-ssh.md).
 
 A repo can serve many packages: map a name to one folder of it, and
 `npm install` fetches just that folder, with the repo's version tags as
-the package's versions.
+the package's versions. A folder can also release on its own schedule
+with a tag that names it (`@acme/widgets-core@v1.2.0`); see "By design".
 
 ```sh
 consona map add @acme/widgets-core acme/widgets packages/core
@@ -357,13 +358,19 @@ consona map remove @acme/widgets-core
 
 Worked examples with sample output:
 [docs/examples.md](docs/examples.md#210-serve-a-folder-of-a-repo-as-a-package-consona-map-add).
+The working rules for repos and consumers (developers and AI agents):
+[docs/rules.md](docs/rules.md).
 
 **By design**
 
-- Versions are the repo's version tags, shared by every folder in it;
-  per-folder versions are not supported. An untagged repo serves its
-  default-branch head as `0.0.0-<commit>` (a prerelease). Tag the repo
-  to give its folders real semver.
+- Versions come from tags. A plain tag (`v1.4.0`) is the repo's
+  version, shared by every folder in it. A tag naming one package
+  (`@acme/widgets-core@v1.2.0`, the full mapped name, with or without
+  the `v`) is that folder's version alone and wins over a repo-wide tag
+  of the same version, so folders can release independently. An untagged
+  repo serves its default-branch head as `0.0.0-<commit>` (a
+  prerelease). Tag the repo - or the folder - to give packages real
+  semver.
 - The served name and version come from the map and the repo's tags, not
   from the folder's `package.json` (the same rule as a repo of its own).
   If `package.json` names something else, consona warns and code
@@ -390,15 +397,22 @@ Worked examples with sample output:
 
 - On an untagged repo a sibling range like `^1.0.0` matches nothing (the
   served version is the `0.0.0-<commit>` prerelease) and npm fails with
-  `ETARGET`. Use a range that admits it (for example `>=0.0.0-0`) or tag
-  the repo `v1.x`.
+  `ETARGET`. Use a range that admits it (for example `>=0.0.0-0`), tag
+  the repo `v1.x`, or tag the folder `@acme/widgets-ui@v1.0.0`.
 - If the repo head moves between two packages' resolutions they can pin
-  different commits. Tag the repo and depend on the tagged versions for
-  a reproducible sibling set.
-- The lockfile pins exact versions with their integrity: a moved tag or
-  a remapped folder surfaces as a checksum mismatch (consona also warns
-  when a tag points at another commit), never as silently different
-  bytes. It detects the change rather than re-fetching the old bytes.
+  different commits. npm sends no install-session identity, so one
+  install cannot be an atomic snapshot across packages; tag the repo (or
+  each folder) and depend on the tagged versions for a reproducible
+  sibling set.
+- Tarball URLs are commit-qualified: the lockfile pins the exact commit
+  (and, for a mapped folder, the mapping) each version's integrity was
+  built from. A moved tag changes the URL new installs fetch, and an old
+  lockfile keeps installing the commit it recorded - served from the
+  build cache when present, otherwise rebuilt from the pinned commit
+  (byte-identical when the package builds reproducibly). A remapped
+  folder never serves under the old mapping's URL: the original cached
+  bytes or a clean 404. consona still warns when a tag points at another
+  commit.
 - A mapped folder without a `package.json` at its root fails the
   install, naming the repo, folder and commit.
 

@@ -21,6 +21,8 @@ How to read the commands:
   | `alice@203.0.113.10` | an ssh login on another machine (`user@host`) |
   | `my-app`, `date-utils` | example project and package folders |
 
+- The working rules behind these examples (for developers and AI
+  agents) are collected in [rules.md](rules.md).
 - Sample output is from a real run of consona 0.10.0 on Linux, shortened
   (npm's own `npm verbose` / `npm http` lines are left out). Paths, device
   ids, versions and timings will differ on your machine. The daemon's
@@ -425,6 +427,15 @@ npm install @your-github-name/your-lib@1.2.0     # what the warning tells you to
 consona: warning: @your-github-name/your-lib@1.2.0: tag v1.2.0 now points at commit 9b1d2e4, but this version was built here before from commit 3fa9c21; a lockfile written then has the old integrity and npm will fail with EINTEGRITY. Run `npm install @your-github-name/your-lib@1.2.0` to update the lockfile, or move the tag back
 ```
 
+Lockfiles written since tarball URLs became commit-qualified pin the
+exact commit each version was built from, so they keep installing that
+commit after the tag moves (served from the build cache, or rebuilt
+from the pinned commit while it stays reachable; a rebuild matches the
+old integrity when the package builds reproducibly). The warning still
+fires, because a moved tag usually means a release mistake: publish a
+new tag instead. Older, version-only lockfile entries keep the previous
+behavior: the version re-resolves and the move surfaces as EINTEGRITY.
+
 ### 2.10 Serve a folder of a repo as a package (`consona map add`)
 
 **When to use:** one private repo holds several packages (a monorepo)
@@ -526,25 +537,32 @@ npm install @acme-co/widgets-core           # widgets-ui comes along automatical
 
 **What each part means / what happens:**
 
-- Versions belong to the repo, not the folder: tagging `acme-co/widgets`
-  `v1.4.0` offers both folders as `1.4.0` (see 2.2). Per-folder versions
-  are not supported.
+- Versions come from tags. Tagging `acme-co/widgets` `v1.4.0` offers
+  both folders as `1.4.0` (see 2.2). To release one folder on its own,
+  tag it by its full mapped name: `git tag @acme-co/widgets-core@v1.5.0`
+  offers only `@acme-co/widgets-core` as `1.5.0`, and that tag wins over
+  a repo-wide `v1.5.0` if both exist. Repos without such tags behave
+  exactly as before.
 - An untagged repo serves a single `0.0.0-<commit>` prerelease, and a
   dependency range must admit what the repo serves. On an untagged repo
   `^1.0.0` matches nothing and npm fails with
   `ETARGET No matching version found`; a range like `>=0.0.0-0` admits
-  the prerelease. Tag the repo `v1.x` and `^1.0.0` works. This is a
-  real failure to plan for, not a warning: existing `^` ranges between
-  the repo's packages need matching tags before they install.
+  the prerelease. Tag the repo `v1.x` - or the folder
+  `@acme-co/widgets-ui@v1.0.0` - and `^1.0.0` works. This is a real
+  failure to plan for, not a warning: existing `^` ranges between the
+  repo's packages need matching tags before they install.
 - Each package resolves on its own. Two mapped folders of one repo
   normally install at the same commit, but if the repo head moves
   between the two resolutions they can pin different commits - one
   install is not an atomic snapshot across packages. For a reproducible
   sibling set, tag the repo and depend on the tagged versions.
-- The lockfile pins each version with its integrity. A moved tag (see
-  2.9) or a remap to another folder changes the bytes, and npm then
-  fails with `EINTEGRITY`: the change is detected, but the old bytes are
-  not fetched again - update the lockfile or move the tag back.
+- The lockfile pins each version with its integrity and exact commit.
+  After a moved tag (see 2.9) or a remap to another folder, an old
+  lockfile keeps installing the pinned commit's original bytes from the
+  build cache (or a clean 404 after a remap on a cold cache); the new
+  folder is never served under the old mapping's URL. Run
+  `npm install <name>@latest` to move the lockfile to the new state on
+  purpose.
 
 ### 2.13 What a mapped folder sees at install and build time
 
@@ -571,7 +589,9 @@ want to know exactly what is present.
   that can read the repo can read every folder in it.
 - Remapping a name to another folder (or another repo) rebuilds instead
   of serving the previous folder's cached bytes; both mappings stay
-  cached under their own identities, no cache clearing needed.
+  cached under their own identities, no cache clearing needed. Lockfiles
+  written before the remap keep installing the original bytes (see
+  2.12).
 
 ## 3. Local packages on the same machine
 
