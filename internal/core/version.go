@@ -63,7 +63,7 @@ var fullCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // tarball name (see npmpack.QualifiedFileName).
 func IsFullCommit(s string) bool { return fullCommitRe.MatchString(s) }
 
-var cacheIDRe = regexp.MustCompile(`^[0-9a-f]{40}(-src[0-9a-f]{16})?$`)
+var cacheIDRe = regexp.MustCompile(`^[0-9a-f]{40}(-src[0-9a-f]{64})?$`)
 
 // IsCacheID reports whether s is a well-formed cache identity (see
 // CacheID). Identities come from untrusted tarball URLs and become path

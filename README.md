@@ -391,7 +391,8 @@ The working rules for repos and consumers (developers and AI agents):
   well as name, commit and version, so remapping a name rebuilds instead
   of serving the previous folder's bytes.
 - Each package resolves and fetches at its own resolved commit; one
-  install is not an atomic snapshot across packages.
+  install is not an atomic snapshot across packages (npm's registry
+  protocol carries no install-session identity).
 
 **Failures to expect**
 
@@ -400,10 +401,10 @@ The working rules for repos and consumers (developers and AI agents):
   `ETARGET`. Use a range that admits it (for example `>=0.0.0-0`), tag
   the repo `v1.x`, or tag the folder `@acme/widgets-ui@v1.0.0`.
 - If the repo head moves between two packages' resolutions they can pin
-  different commits. npm sends no install-session identity, so one
-  install cannot be an atomic snapshot across packages; tag the repo (or
-  each folder) and depend on the tagged versions for a reproducible
-  sibling set.
+  different commits. Under npm's current registry protocol no
+  install-session identity reaches the registry, so one install cannot
+  be an atomic snapshot across packages; tag the repo (or each folder)
+  and depend on the tagged versions for a reproducible sibling set.
 - Tarball URLs are commit-qualified: the lockfile pins the exact commit
   (and, for a mapped folder, the mapping) each version's integrity was
   built from. A moved tag changes the URL new installs fetch, and an old

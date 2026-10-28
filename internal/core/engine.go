@@ -98,13 +98,13 @@ func CacheID(rev Revision) string {
 	if rev.SourceID == "" {
 		return rev.Commit
 	}
-	// 64 bits of SHA-256 of the full source identity: collision-resistant,
-	// so a URL or cache entry bound to one mapping can never match another
-	// (an fnv hash could collide). Changing this scheme orphans older
-	// cache entries, which are rebuilt on demand - that is all a cache
-	// scheme change may cost.
+	// Full SHA-256 of the full source identity: a URL or cache entry
+	// bound to one mapping matches only that mapping, under the same
+	// collision assumption as git's own object IDs. Changing this scheme
+	// orphans older cache entries, which are rebuilt on demand - that is
+	// all a cache scheme change may cost.
 	sum := sha256.Sum256([]byte(rev.SourceID))
-	return rev.Commit + "-src" + hex.EncodeToString(sum[:8])
+	return rev.Commit + "-src" + hex.EncodeToString(sum[:])
 }
 
 // Packages returns every published version of ref, ascending. Versions

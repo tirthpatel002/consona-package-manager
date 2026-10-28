@@ -85,7 +85,7 @@ func QualifiedFileName(name, version string, rev core.Revision) string {
 	return strings.TrimSuffix(FileName(name, version), ".tgz") + "-" + core.CacheID(rev) + ".tgz"
 }
 
-var qualifiedRe = regexp.MustCompile(`^(.+)-([0-9a-f]{40}(-src[0-9a-f]{16})?)\.tgz$`)
+var qualifiedRe = regexp.MustCompile(`^(.+)-([0-9a-f]{40}(-src[0-9a-f]{64})?)\.tgz$`)
 
 // ParseQualifiedFileName is the inverse of QualifiedFileName: the version
 // and cache identity a qualified tarball name pins. ok is false for

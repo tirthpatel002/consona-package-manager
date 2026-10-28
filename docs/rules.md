@@ -64,11 +64,14 @@ actually serves (R5, R6): `^1.0.0` needs a matching `v1.x` tag;
 dependency must check the served versions (`npm view @owner/name
 versions`) instead of inventing a range.
 
-R9. Packages resolve one at a time: npm sends no install-session
-identity, so consona cannot guarantee one atomic snapshot across
-packages. If the repo head moves mid-install, two packages can pin
-different commits. For a reproducible set, tag and depend on tagged
-versions; the lockfile then pins exact commits.
+R9. Packages resolve one at a time: under npm's current registry
+protocol each package is fetched independently and no install-session
+identity reaches the registry, so consona cannot guarantee one atomic
+snapshot across packages. If the repo head moves mid-install, two
+packages can pin different commits. For a reproducible set, tag and
+depend on tagged versions; the lockfile then pins exact commits. (An
+explicit project-level pin or manifest could close this in future; it
+is a protocol limitation, not a fundamental one.)
 
 ## 4. Folder maps (monorepos)
 
@@ -141,7 +144,8 @@ failure contradicts this file, trust the observed failure and say so.
 
 ## 8. Known limits (current, honest)
 
-- One install is not an atomic snapshot across packages (R9).
+- One install is not an atomic snapshot across packages under
+  npm's current registry protocol (R9).
 - Recovery of pinned commits depends on the build cache or a
   reproducible rebuild; neither is guaranteed forever (R14).
 - The whole repo tarball is downloaded for a mapped folder (R12); very
