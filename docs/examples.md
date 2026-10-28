@@ -593,6 +593,30 @@ want to know exactly what is present.
   written before the remap keep installing the original bytes (see
   2.12).
 
+### 2.14 Make the first install consistent (`consona snapshot`)
+
+```
+$ consona snapshot create
+consona: wrote consona.snapshot.json (1 repo(s), id 6535ee239cf3). Each repo was read twice and written only if both reads agreed.
+$ consona snapshot use
+consona: snapshot 6535ee239cf3 loaded; ./.npmrc now routes @consona-fixtures through it.
+$ npm install          # same for pnpm install; every package sees the recorded repo state
+```
+
+The `.npmrc` gets a managed block:
+
+```
+# consona snapshot (managed by `consona snapshot use`)
+@consona-fixtures:registry=http://127.0.0.1:48777/npm/s/<sha256>/
+# end consona snapshot
+```
+
+If the folder map no longer matches what the snapshot recorded, npm stops
+with a 409 and says which mapping changed; nothing is served from live
+data. Refresh on purpose with `consona snapshot update` (it prints head and
+tag changes), then `npm install` and commit the snapshot and lockfile
+together. Rules: docs/rules.md S1-S9.
+
 ## 3. Local packages on the same machine
 
 ### 3.1 Give this device a consona username (`init`)

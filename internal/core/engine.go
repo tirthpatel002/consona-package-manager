@@ -112,13 +112,19 @@ func CacheID(rev Revision) string {
 // by Build.
 func (e *Engine) Packages(ctx context.Context, b Builder, ref Ref, name string) ([]*Version, error) {
 	key := b.Ecosystem() + "|" + ref.String()
+	if id := SnapshotID(ctx); id != "" {
+		key += "|snap:" + id // never share a version list with live or another snapshot
+	}
 	l := e.lock(key)
 	l.Lock()
 	defer l.Unlock()
 	e.mu.Lock()
 	m, ok := e.memo[key]
 	e.mu.Unlock()
-	if ok && time.Since(m.at) < e.TTL && !e.live(ref) {
+	// A snapshot request never reuses a memoized list: resolving under a
+	// snapshot reads no network state (it is cheap) and must re-validate the
+	// device's folder mapping against the snapshot on every request.
+	if ok && time.Since(m.at) < e.TTL && !e.live(ref) && SnapshotID(ctx) == "" {
 		return m.pkgs, nil
 	}
 	revs, err := e.Source.Revisions(ctx, ref)

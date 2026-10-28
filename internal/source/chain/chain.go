@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/snapshot"
 	"strings"
 	"sync"
 	"time"
@@ -189,6 +190,9 @@ func latestVersion(revs []core.Revision) string {
 // that has the name still wins.
 func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, error) {
 	name := pkgName(ref)
+	if snap, hash, ok := snapshot.FromContext(ctx); ok {
+		return c.snapshotRevisions(ctx, ref, name, snap, hash)
+	}
 	if e, ok := c.Local.Lookup(ref); ok {
 		revs, err := c.Local.Revisions(ctx, ref)
 		if err != nil { // local always wins: do not fall through to other sources
@@ -249,6 +253,51 @@ func (c *Chain) Revisions(ctx context.Context, ref core.Ref) ([]core.Revision, e
 	return g.revs, nil
 }
 
+// snapshotRevisions resolves ref for a request under a project snapshot.
+// Only the two sources a snapshot records are allowed: GitHub repos (their
+// tags and head come from the snapshot, see github.Source.TagsAndHead) and
+// folder-map entries that still match the mapping the snapshot recorded.
+// Anything live (a registered local folder) or unrecorded (ssh remotes, a
+// changed or new mapping) is a clear error, never a silent alternative.
+func (c *Chain) snapshotRevisions(ctx context.Context, ref core.Ref, name string, snap *snapshot.Snapshot, hash string) ([]core.Revision, error) {
+	id := hash
+	if len(id) > 12 {
+		id = id[:12]
+	}
+	if _, ok := c.Local.Lookup(ref); ok {
+		return nil, c.failed(name, refuse("%s is a registered local folder, which is live and cannot be part of snapshot %s: run `consona unregister` for it, or install without the project's snapshot", name, id))
+	}
+	rec, recorded := snap.Folders[strings.ToLower(name)]
+	if c.Folders != nil {
+		if e, ok := c.Folders.Lookup(ref); ok {
+			switch {
+			case !recorded:
+				return nil, c.failed(name, refuse("%s is mapped on this device to %s/%s but snapshot %s does not record that mapping: run `consona snapshot update`", name, e.Repo, e.Path, id))
+			case !strings.EqualFold(e.Repo, rec.Repo) || e.Path != rec.Path:
+				return nil, c.failed(name, refuse("%s is mapped to %s/%s but snapshot %s recorded %s/%s: the folder map changed; restore it or run `consona snapshot update`", name, e.Repo, e.Path, id, rec.Repo, rec.Path))
+			}
+			revs, err := c.Folders.Revisions(ctx, ref)
+			if err != nil {
+				return nil, c.failed(name, fmt.Errorf("%w (snapshot %s: no other source was tried)", err, id))
+			}
+			c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "github-folder", Where: c.Folders.Describe(ref) + " [snapshot " + id + "]"})
+			return revs, nil
+		}
+	}
+	if recorded {
+		return nil, c.failed(name, refuse("snapshot %s recorded %s as folder %s of %s, but it is not mapped on this device: run `consona map add` or `consona map sync`", id, name, rec.Path, rec.Repo))
+	}
+	if c.GitHub == nil {
+		return nil, c.failed(name, fmt.Errorf("%s: not logged in to GitHub, so the snapshot's repo cannot be read: %w", name, core.ErrAccess))
+	}
+	revs, err := c.GitHub.Revisions(ctx, ref)
+	if err != nil {
+		return nil, c.failed(name, fmt.Errorf("%w (snapshot %s: no other source was tried)", err, id))
+	}
+	c.record(Resolution{Name: name, Version: latestVersion(revs), Kind: "github", Where: c.GitHub.Describe(ref) + " [snapshot " + id + "]"})
+	return revs, nil
+}
+
 // Fetch dispatches by revision kind.
 func (c *Chain) Fetch(ctx context.Context, ref core.Ref, commit, dir string) error {
 	if c.Folders != nil {
@@ -306,4 +355,10 @@ func (c *Chain) PrivateScopes() map[string]bool {
 		}
 	}
 	return out
+}
+
+// refuse builds an error for a request the snapshot cannot serve; the
+// registry reports it as a conflict (not retryable), never as upstream failure.
+func refuse(format string, a ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{snapshot.ErrRefused}, a...)...)
 }

@@ -93,6 +93,8 @@ func Run(args []string) (code int, ok bool) {
 		return cmdServe(ctx), true
 	case "map":
 		return cmdMap(ctx, args[1:]), true
+	case "snapshot":
+		return cmdSnapshot(ctx, args[1:]), true
 	case "which":
 		return cmdWhich(ctx, args[1:]), true
 	}

@@ -143,3 +143,17 @@ type Adapter interface {
 	// warm the daemon while the tool starts up).
 	Exec(ctx context.Context, baseURL string, args []string) int
 }
+
+type snapshotIDKey struct{}
+
+// WithSnapshotID marks ctx as resolving under the project snapshot id, so
+// version lists are never shared with live or other-snapshot requests.
+func WithSnapshotID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, snapshotIDKey{}, id)
+}
+
+// SnapshotID returns the request's snapshot id, or "" for live resolution.
+func SnapshotID(ctx context.Context) string {
+	id, _ := ctx.Value(snapshotIDKey{}).(string)
+	return id
+}

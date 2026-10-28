@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tirthpatel002/consona-package-manager/internal/snapshot"
 	"io"
 	"net/http"
 	"net/url"
@@ -272,6 +273,45 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 	return core.RevisionsFromTags(tags, head), nil
 }
 
+// Capture reads the repo's live tags and default-branch head, always both
+// (TagsAndHead skips the head when plain semver tags exist). It fails
+// instead of truncating when the repo has more tags than one capture
+// reads, because a silently partial snapshot would resolve wrong versions.
+func (s *Source) Capture(ctx context.Context, r core.Ref) ([]core.Tag, string, error) {
+	head, err := s.head(ctx, r)
+	if err != nil {
+		return nil, "", wrap(s, r, err)
+	}
+	var tags []core.Tag
+	for page := 1; ; page++ {
+		if page > 10 {
+			return nil, "", fmt.Errorf("%s/%s has more than 1000 tags; consona snapshots do not cover that yet", r.Owner, r.Name)
+		}
+		resp, err := s.get(ctx, r.Owner, r.Name, fmt.Sprintf("%s/tags?per_page=100&page=%d", repoPath(r), page), "application/vnd.github+json")
+		if err != nil {
+			return nil, "", wrap(s, r, err)
+		}
+		var batch []struct {
+			Name   string `json:"name"`
+			Commit struct {
+				SHA string `json:"sha"`
+			} `json:"commit"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&batch)
+		resp.Body.Close()
+		if err != nil {
+			return nil, "", err
+		}
+		for _, t := range batch {
+			tags = append(tags, core.Tag{Name: t.Name, Commit: t.Commit.SHA})
+		}
+		if len(batch) < 100 {
+			break
+		}
+	}
+	return tags, head, nil
+}
+
 // TagsAndHead returns the repo's raw tags and its default-branch head
 // (fetched in parallel). Sources that select their own tag convention
 // (see ghfolder) compose revisions from these; the head is "" when no
@@ -279,6 +319,11 @@ func (s *Source) Revisions(ctx context.Context, r core.Ref) ([]core.Revision, er
 // and tags exist. A head failure is fatal exactly when the repo has no
 // plain semver tags, matching Revisions.
 func (s *Source) TagsAndHead(ctx context.Context, r core.Ref) ([]core.Tag, string, error) {
+	// A request resolving under a project snapshot never reads live state:
+	// it gets the recorded tags and head, or an error (no live fallback).
+	if snap, _, ok := snapshot.FromContext(ctx); ok {
+		return snap.TagsAndHead(r)
+	}
 	// Ask for the default-branch head in parallel with the tags: it is only
 	// needed for untagged repos, but then it costs no extra round trip.
 	type headResult struct {

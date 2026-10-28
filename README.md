@@ -417,10 +417,19 @@ The working rules for repos and consumers (developers and AI agents):
 - A mapped folder without a `package.json` at its root fails the
   install, naming the repo, folder and commit.
 
+**Project snapshots (opt-in)**
+
+`consona snapshot create` + `consona snapshot use` freeze each repo's
+head, tags and folder mapping for a project, so the first install sees
+one repo state even if someone pushes mid-install. It fails closed
+(404/409, never live data) and does not make independently tagged
+packages share a commit. Details: docs/rules.md S1-S9.
+
 **Not verified yet**
 
 The mapped install, sibling dependencies and the remap case are proven
-locally on one machine and one account with npm 10.9 and pnpm 12.15.
+locally on one machine and one account with npm 10.9 and pnpm 12.15 (snapshots
+included; not run on Windows or macOS).
 Real GitHub Actions CI and a second contributor's machine are untested;
 treat those setups as unverified until they are run.
 

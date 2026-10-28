@@ -64,14 +64,73 @@ actually serves (R5, R6): `^1.0.0` needs a matching `v1.x` tag;
 dependency must check the served versions (`npm view @owner/name
 versions`) instead of inventing a range.
 
-R9. Packages resolve one at a time: under npm's current registry
-protocol each package is fetched independently and no install-session
-identity reaches the registry, so consona cannot guarantee one atomic
-snapshot across packages. If the repo head moves mid-install, two
-packages can pin different commits. For a reproducible set, tag and
-depend on tagged versions; the lockfile then pins exact commits. (An
-explicit project-level pin or manifest could close this in future; it
-is a protocol limitation, not a fundamental one.)
+R9. Without a snapshot, packages resolve one at a time: npm sends no
+install identity, so each package reads the repo's tags and head at its
+own moment. If the repo changes mid-install, two packages can see
+different repo states. Tag and depend on tagged versions, and the
+lockfile then pins exact commits (R12). To make the FIRST install
+consistent too, use a project snapshot (rules S1-S9).
+
+### Project snapshots (opt-in)
+
+S1. `consona snapshot create` records, once, each repo's default-branch
+head and tag->commit map, plus the folder mapping of every mapped
+package, in `consona.snapshot.json`. Commit it. `consona snapshot use`
+loads it on this device and adds a managed block to the project's
+`.npmrc` that sends the snapshot's scopes through the daemon at
+`/npm/s/<sha256 of the file>/`. Plain installs without that block are
+live, exactly as before. `consona snapshot unuse` removes the block;
+other `.npmrc` lines are never touched, and `use` refuses if the file
+already sets `@scope:registry` for one of the scopes.
+
+S2. What it guarantees: every package of an install resolves against
+the same recorded tag set and head per repo, so a push or a moved tag
+during the install changes nothing. What it does not: independently
+tagged packages may legitimately sit at different commits, and your
+semver ranges must still fit the recorded versions. A conflict is the
+same every time instead of depending on timing.
+
+S3. Capture is stable, not atomic. GitHub offers no atomic read of head
+and tags together. Create reads each repo twice and writes only if both
+reads agree (up to 3 tries), else it writes nothing. Different repos
+are captured one after another. More than 1000 tags in a repo is
+refused rather than truncated.
+
+S4. Fail closed. Under a snapshot nothing falls back to live data. The
+daemon answers 404 for a snapshot that is not loaded or whose stored
+file no longer matches its hash (run `consona snapshot use`), and 409
+(not retried by npm) for: a repo the snapshot does not record, a folder
+mapping that differs from the recorded one (changed, removed or new), a
+package that is a registered local folder (`consona register` is live
+by design), and ssh remotes are never consulted.
+
+S5. The snapshot carries no credential and grants no access. Every
+fetch still uses the normal credential chain. The file is untrusted
+input: it is size-capped, strictly parsed, commits must be 40-hex, repo
+and folder names are validated, and it is addressed by its SHA-256. A
+file someone else commits can only pin older commits of repos you can
+already read, the same trust as a lockfile; review changes to it like
+a lockfile.
+
+S6. Lockfiles are unaffected: tarball URLs stay commit and source
+pinned and do not contain the snapshot, so updating a snapshot never
+rewrites lockfile URLs. After `consona snapshot update`, re-resolve
+deliberately (`npm install`), review the lockfile diff, then commit
+both.
+
+S7. `consona snapshot update` re-captures the same repos, re-reads the
+folder map and prints what changed ("tag X MOVED", "mapping X CHANGED").
+A moved tag is a release-hygiene bug (R4); do not move tags.
+
+S8. Snapshot requests never reuse the 30 second version-list cache, so
+the mapping check runs on every request.
+
+S9. Verified: npm 10.9 and pnpm 12.15 install through the snapshot URL
+on Linux; the carrier needs no process lookup, but it has not been run
+on Windows or macOS. An AI agent: run `consona snapshot show` before
+changing dependencies, never edit the file by hand (the hash changes and
+the project must run `snapshot use` again), and never remove a mapping
+to "fix" a 409; read the message.
 
 ## 4. Folder maps (monorepos)
 
@@ -144,8 +203,9 @@ failure contradicts this file, trust the observed failure and say so.
 
 ## 8. Known limits (current, honest)
 
-- One install is not an atomic snapshot across packages under
-  npm's current registry protocol (R9).
+- Without a snapshot an install is not consistent across packages
+  (R9). With one it is consistent per repo (S1-S9); not atomic across
+  repos, and not a single commit for independently tagged packages.
 - Recovery of pinned commits depends on the build cache or a
   reproducible rebuild; neither is guaranteed forever (R14).
 - The whole repo tarball is downloaded for a mapped folder (R12); very

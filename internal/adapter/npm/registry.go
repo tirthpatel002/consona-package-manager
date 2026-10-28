@@ -20,6 +20,7 @@ import (
 	"github.com/tirthpatel002/consona-package-manager/internal/devsync"
 	"github.com/tirthpatel002/consona-package-manager/internal/logstore"
 	"github.com/tirthpatel002/consona-package-manager/internal/lookalike"
+	"github.com/tirthpatel002/consona-package-manager/internal/snapshot"
 )
 
 // Handler is npm's registry (setup points npm's `registry` here):
@@ -187,6 +188,29 @@ func jsonErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/s/") {
+		// Project snapshot: /s/<hash>/<normal npm path>. The snapshot rides
+		// in the request, so concurrent projects never share state; an
+		// unknown or corrupt snapshot is a clear error, never live data.
+		hash, tail, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/s/"), "/")
+		if !snapshot.ValidHash(hash) {
+			jsonErr(w, http.StatusBadRequest, "consona: invalid snapshot id in the registry URL")
+			return
+		}
+		snap, err := snapshot.Load(hash)
+		if err != nil {
+			jsonErr(w, http.StatusNotFound, "consona: "+err.Error())
+			return
+		}
+		r2 := r.Clone(snapshot.With(r.Context(), hash, snap))
+		u := *r.URL
+		u.Path = "/" + tail
+		if r.URL.RawPath != "" {
+			u.RawPath = "/" + strings.TrimPrefix(strings.TrimPrefix(r.URL.RawPath, "/s/"+hash), "/")
+		}
+		r2.URL = &u
+		r = r2
+	}
 	switch {
 	case r.URL.Path == "/-/warm" && r.Method == http.MethodPost:
 		var names []string
@@ -298,7 +322,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusNotFound, name+": no such tarball "+file)
 		return
 	}
-	if !h.noWarm {
+	if !h.noWarm && snapshot.FromContextOK(r.Context()) == false {
 		go h.warmDeps(name, pkgs, scopes)
 	}
 	h.checkName(ref, name, latest(pkgs))
@@ -367,6 +391,9 @@ func (h *handler) fail(w http.ResponseWriter, ref core.Ref, name string, err err
 	case errors.Is(err, core.ErrNotFound):
 		code, ecode = http.StatusNotFound, "not-found"
 		msg = fmt.Sprintf("%s is private (scope @%s is routed to consona) but %s was not found or is not accessible with your GitHub credentials. Check the name or request access; `consona token test` shows what each credential can see.", name, ref.Owner, h.e.Source.Describe(ref))
+	case errors.Is(err, snapshot.ErrRefused) || errors.Is(err, snapshot.ErrNotInSnapshot):
+		code, ecode = http.StatusConflict, "snapshot-conflict"
+		msg = fmt.Sprintf("%s: %v", name, err)
 	case errors.Is(err, core.ErrBuild):
 		code, ecode = http.StatusUnprocessableEntity, "build-failed"
 		msg = err.Error()
